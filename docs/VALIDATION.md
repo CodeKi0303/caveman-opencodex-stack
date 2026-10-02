@@ -1,5 +1,46 @@
 # 검증 기록
 
+## 0.2.0 실제 적용 (2026-10-03)
+
+- GitHub Actions의 Windows·Linux 검증 모두 성공. 각 OS에서 Node 42개 통과·다른 OS 전용 2개 제외, Linux Python 3개 통과.
+- 실제 고정 Caveman 바이너리로 계정·세션·하위 작업 헤더 전달 확인.
+- `stack update`의 상태 백업·격리 후보 기동·카탈로그 확인·운영 교체 성공. 운영 컨테이너 `healthy`, 부팅 서비스 활성화 유지.
+- 실제 GPT-6.1 Sol SSE 완료와 압축 기록 확인. 합성 원문 66,392바이트를 인증된 HTTP MCP로 정확히 복구.
+- `/mcp`와 `/v1/catalog`의 무인증 요청은 401. 복구 도구 목록에는 `caveman_retrieve`만 노출.
+- Windows, WSL Ubuntu 24.04, 원격 Linux Codex 홈 모두 HTTP MCP로 전환하고 `doctor` 경고 없이 통과.
+- 세 클라이언트의 15분 예약을 실제 설치·실행하고 종료 코드 0 확인. 변경 없는 동기화는 304를 받고 파일·백업을 추가로 만들지 않음.
+- Linux/WSL 사용자 타이머는 linger를 활성화. WSL이 종료된 동안에는 실행되지 않으며 별도 자동 부팅은 설정하지 않음.
+- 세 클라이언트 `auth.json`의 변경 전후 해시 일치. 서버 컨테이너에는 사용자 OAuth 파일 없음.
+- Git 포함 파일에서 현재 실제 토큰·게이트웨이 키 문자열 검출 없음.
+
+원격 Linux에는 이미지의 Node 24.14.1 실행 파일과 클라이언트용 JS 의존성만 호스트에 추출했습니다.
+서버 프로세스는 계속 Podman 컨테이너에서 실행됩니다. 설정 파일과 통신을 검증했으며,
+실행 중인 Codex Desktop/CLI의 설정 재로딩은 자동으로 수행하지 않았습니다. 클라이언트 연결을 재시작해야 합니다.
+
+## HTTP 복구 종단 간 확인
+
+실제 모델 호출과 압축·원문 복구를 함께 확인하려면 서버 호스트에서 다음을 실행합니다.
+인증 파일은 해당 클라이언트의 로컬 파일을 읽으며 컨테이너로 복사하지 않습니다.
+
+```bash
+python3 scripts/smoke.py --url http://192.168.50.61:18787/v1 --key-file secrets/gateway-key --auth-file /root/.codex/auth.json --state-dir data/state --mcp
+```
+
+이 명령은 합성 데이터로 모델 요청을 한 번 보내므로 해당 계정의 사용량을 소비합니다.
+Responses/SSE 완료, Caveman 압축 기록, CCR 원문, 인증된 HTTP MCP의 동일 원문 반환을 확인합니다.
+출력에는 인증 값과 원문을 포함하지 않습니다.
+
+## 0.2.0 클라이언트 예약 테스트 (2026-10-03)
+
+Windows와 WSL Ubuntu 24.04에서 `node --test tests/schedule.test.mjs`를 실행했습니다.
+Windows는 6개 통과·Linux 전용 1개 제외, WSL은 5개 통과·Windows 전용 2개 제외입니다.
+사용자 범위·경로 인용·Codex 홈별 동일 예약 갱신·소유권 확인·모의 설치/삭제와
+예약 실행기의 클라이언트 인수·종료 코드·마지막 로그 교체를 검사했습니다.
+Windows PowerShell 5.1에서 BOM 없는 UTF-8 설정의 한글 경로로 테스트 실행기를 호출하는 것도 확인했습니다.
+테스트는 실제 Scheduled Task나 systemd 예약을 등록하지 않습니다.
+WSL의 `systemd-analyze calendar`로 15분 및 매시간 달력 표현식을 확인했습니다.
+실제 로그인/재부팅 후 실행과 실제 예약 등록은 이 테스트 결과에 포함하지 않습니다.
+
 2026-10-02, Ubuntu 26.04 amd64 / Podman 5.7.0에서 수행했습니다.
 
 - 실제 이미지 빌드 및 Caveman 서명/checksum 검증 설치 성공.

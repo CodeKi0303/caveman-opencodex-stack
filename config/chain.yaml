@@ -5,3 +5,21 @@ subscription_compress: live_zone
 compat:
   opencodex:
     base_url: http://127.0.0.1:10101/v1
+    # Named compat mounts otherwise discard Codex's account and child-turn metadata.
+    # Authorization is mapped separately by Caveman; gateway keys never reach this hop.
+    forward_headers:
+      - chatgpt-account-id
+      - openai-beta
+      - originator
+      - session-id
+      - thread-id
+      - x-codex-beta-features
+      - x-codex-installation-id
+      - x-codex-parent-thread-id
+      - x-codex-turn-metadata
+      - x-codex-turn-state
+      - x-codex-window-id
+      - x-oai-attestation
+      - x-openai-subagent
+      - x-responsesapi-include-timing-metrics
+      - x-openai-internal-codex-responses-lite

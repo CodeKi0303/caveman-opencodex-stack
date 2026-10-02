@@ -38,7 +38,7 @@ def image_id(c):
     return p.read_text().strip() if p.exists() else c['IMAGE']
 
 def runtime_env(c):
-    allowed={'HTTP_PROXY','HTTPS_PROXY','NO_PROXY','ALLOWED_CIDRS','MAX_REQUEST_BYTES','CAVEMAN_MODE','GATEWAY_TLS_CERT','GATEWAY_TLS_KEY'}
+    allowed={'HTTP_PROXY','HTTPS_PROXY','NO_PROXY','ALLOWED_CIDRS','MAX_REQUEST_BYTES','CAVEMAN_MODE','GATEWAY_TLS_CERT','GATEWAY_TLS_KEY','CATALOG_REFRESH_SECONDS'}
     return [a for k,v in c.items() if k in allowed and v for a in ['--env',k+'='+v]]
 
 def build_env(c):
@@ -93,18 +93,8 @@ def launch(c,image=None,container=None,state=None,publish=True):
 def catalog(c,container=None):
     # HTTP uses the shared loopback namespace, even with external HTTPS enabled.
     # Export from OpenCodex directly: the command runs inside this private container.
-    code="""
-import fs from 'node:fs';
-const v=JSON.parse(fs.readFileSync('/app/package.json')).dependencies['@openai/codex'];
-const r=await fetch('http://127.0.0.1:10101/v1/models?client_version='+v);
-if(!r.ok)throw Error('Catalog HTTP '+r.status);
-const d=await r.json();if(!Array.isArray(d.models)||!d.models.length)throw Error('Empty catalog');
-fs.mkdirSync('/state/catalog',{recursive:true});
-fs.writeFileSync('/state/catalog/models.json.tmp',JSON.stringify(d,null,2)+'\\n',{mode:0o600});
-fs.renameSync('/state/catalog/models.json.tmp','/state/catalog/models.json');
-console.log(JSON.stringify({models:d.models.filter(x=>x.visibility==='list').map(x=>x.slug)}));
-"""
-    pod('exec','--env','NO_PROXY=localhost,127.0.0.1,::1','--env','no_proxy=localhost,127.0.0.1,::1',container or name(c),'node','--input-type=module','-e',code)
+    pod('exec','--env','NO_PROXY=localhost,127.0.0.1,::1','--env','no_proxy=localhost,127.0.0.1,::1',
+        container or name(c),'node','/app/src/catalog-refresh.mjs','--once')
 
 def copy_state(source,target):
     # Unix sockets/FIFOs are transient IPC, not persistent backup data.

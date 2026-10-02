@@ -27,7 +27,8 @@ function stop(code=0) {
 for(const [bin,args] of [
   ['/app/node_modules/.bin/bun',['/app/src/opencodex.ts']],
   ['/opt/caveman/bin/caveman-proxy',[]],
-  [process.execPath,['/app/src/gateway.mjs']]
+  [process.execPath,['/app/src/gateway.mjs']],
+  [process.execPath,['/app/src/catalog-refresh.mjs']]
 ]) {
   const p=spawn(bin,args,{env,stdio:['ignore','inherit','inherit']});children.push(p);
   p.once('error',()=>{console.error('Component failed to start');stop(1);});
