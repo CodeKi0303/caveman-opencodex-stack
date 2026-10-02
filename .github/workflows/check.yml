@@ -1,0 +1,14 @@
+name: check
+on: [push, pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: node --test tests/*.test.mjs
+      - run: python3 -m py_compile stack
+      - run: python3 -m unittest discover -s tests -p '*_test.py'
+      - run: git diff --check

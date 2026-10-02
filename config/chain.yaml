@@ -1,0 +1,7 @@
+label: podman-opencodex
+mode: compress
+listen: 127.0.0.1:8787
+subscription_compress: live_zone
+compat:
+  opencodex:
+    base_url: http://127.0.0.1:10101/v1

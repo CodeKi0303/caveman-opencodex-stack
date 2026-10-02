@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""Small Podman lifecycle CLI; no host npm, compose, or shell-sourced secrets."""
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import secrets
+import shutil
+import stat
+import subprocess
+import sys
+import time
+
+ROOT=Path(__file__).resolve().parent
+os.umask(0o077)
+
+def config():
+    env={}
+    p=ROOT/'.env'
+    if not p.exists():raise RuntimeError('Run ./stack init first')
+    for line in p.read_text().splitlines():
+        if not line.strip() or line.lstrip().startswith('#'):continue
+        k,sep,v=line.partition('=')
+        if not sep:raise RuntimeError('Expected KEY=VALUE in .env')
+        env[k.strip()]=v.strip()
+    return env
+
+def run(args,**kw):
+    return subprocess.run(args,check=True,**kw)
+
+def pod(*args,**kw):return run(['podman',*map(str,args)],**kw)
+
+def name(c):return c['STACK_NAME']
+
+def image_id(c):
+    p=ROOT/'data/active-image'
+    return p.read_text().strip() if p.exists() else c['IMAGE']
+
+def runtime_env(c):
+    allowed={'HTTP_PROXY','HTTPS_PROXY','NO_PROXY','ALLOWED_CIDRS','MAX_REQUEST_BYTES','CAVEMAN_MODE','GATEWAY_TLS_CERT','GATEWAY_TLS_KEY'}
+    return [a for k,v in c.items() if k in allowed and v for a in ['--env',k+'='+v]]
+
+def build_env(c):
+    e=os.environ.copy()
+    for k in ('HTTP_PROXY','HTTPS_PROXY','NO_PROXY'):
+        if c.get(k):e[k]=c[k]
+    return e
+
+def bundle_ca():
+    files=[p for p in (ROOT/'certs').glob('*') if p.suffix in ('.crt','.pem') and p.name!='server.crt']
+    if not files:return None
+    p=ROOT/'secrets/build-ca.pem';p.write_bytes(b'\n'.join(f.read_bytes() for f in files));return p
+
+def build(c,tag=None):
+    args=['build','--format','docker','--network',c.get('BUILD_NETWORK','slirp4netns'),'--tag',tag or c['IMAGE'],'--file',ROOT/'Containerfile']
+    ca=bundle_ca()
+    if ca:args+=['--secret','id=corp_ca,src='+str(ca)]
+    pod(*args,ROOT,env=build_env(c))
+
+def exists(n):return subprocess.run(['podman','container','exists',n],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
+
+def down(c):
+    if exists(name(c)):
+        owner=pod('inspect',name(c),'--format','{{index .Config.Labels "io.caveman-stack.managed"}}',capture_output=True,text=True).stdout.strip()
+        if owner!='true':raise RuntimeError('Refusing to stop a container not owned by this stack')
+        pod('stop','--time','30',name(c),stdout=subprocess.DEVNULL)
+        pod('rm',name(c),stdout=subprocess.DEVNULL)
+
+def launch(c,image=None,container=None,state=None,publish=True):
+    n=container or name(c);state=state or ROOT/'data/state';state.mkdir(parents=True,exist_ok=True,mode=0o700)
+    if exists(n):raise RuntimeError('Container already exists; use status or down first')
+    args=['run','--detach','--name',n,'--network',c.get('NETWORK','slirp4netns'),'--label','io.caveman-stack.managed=true',
+          '--security-opt','no-new-privileges','--cap-drop','all',
+          '--volume',str(state)+':/state:Z',
+          '--volume',str(ROOT/'secrets')+':/run/secrets:ro,z',
+          '--volume',str(ROOT/'certs')+':/certs:ro,z',*runtime_env(c)]
+    if publish:args+=['--publish',f"{c['BIND_ADDRESS']}:{c['PORT']}:8080"]
+    if publish and c.get('ADMIN_PORT'):
+        admin_address=c.get('ADMIN_BIND_ADDRESS') or c['BIND_ADDRESS']
+        args+=['--publish',f"{admin_address}:{c['ADMIN_PORT']}:10100"]
+    pod(*args,image or image_id(c),stdout=subprocess.DEVNULL)
+    try:
+        for _ in range(45):
+            p=subprocess.run(['podman','exec',n,'node','/app/scripts/health.mjs'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            if p.returncode==0:return
+            time.sleep(1)
+        raise RuntimeError('Stack readiness failed; inspect podman logs locally')
+    except BaseException:
+        subprocess.run(['podman','rm','--force',n],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        raise
+
+def catalog(c,container=None):
+    # HTTP uses the shared loopback namespace, even with external HTTPS enabled.
+    # Export from OpenCodex directly: the command runs inside this private container.
+    code="""
+import fs from 'node:fs';
+const v=JSON.parse(fs.readFileSync('/app/package.json')).dependencies['@openai/codex'];
+const r=await fetch('http://127.0.0.1:10101/v1/models?client_version='+v);
+if(!r.ok)throw Error('Catalog HTTP '+r.status);
+const d=await r.json();if(!Array.isArray(d.models)||!d.models.length)throw Error('Empty catalog');
+fs.mkdirSync('/state/catalog',{recursive:true});
+fs.writeFileSync('/state/catalog/models.json.tmp',JSON.stringify(d,null,2)+'\\n',{mode:0o600});
+fs.renameSync('/state/catalog/models.json.tmp','/state/catalog/models.json');
+console.log(JSON.stringify({models:d.models.filter(x=>x.visibility==='list').map(x=>x.slug)}));
+"""
+    pod('exec','--env','NO_PROXY=localhost,127.0.0.1,::1','--env','no_proxy=localhost,127.0.0.1,::1',container or name(c),'node','--input-type=module','-e',code)
+
+def copy_state(source,target):
+    # Unix sockets/FIFOs are transient IPC, not persistent backup data.
+    def transient(directory,names):
+        return [n for n in names if stat.S_ISSOCK((Path(directory)/n).lstat().st_mode)
+                or stat.S_ISFIFO((Path(directory)/n).lstat().st_mode)]
+    shutil.copytree(source,target,symlinks=True,ignore=transient)
+
+def snapshot(c,restart=True):
+    current=image_id(c);down(c)
+    target=ROOT/'backups'/time.strftime('%Y%m%d-%H%M%S');target.mkdir(parents=True,mode=0o700)
+    try:
+        copy_state(ROOT/'data/state',target/'state')
+        (target/'image').write_text(current+'\n')
+        shutil.copy2(ROOT/'.env',target/'stack.env')
+    finally:
+        if restart:launch(c,current)
+    return target
+
+def update(c):
+    tag=c['IMAGE'].rsplit(':',1)[0]+':candidate-'+str(int(time.time()))
+    build(c,tag)
+    # Resolve immutable local image IDs, so later tag changes do not break rollback.
+    old=pod('image','inspect',image_id(c),'--format','{{.Id}}',capture_output=True,text=True).stdout.strip()
+    candidate=pod('image','inspect',tag,'--format','{{.Id}}',capture_output=True,text=True).stdout.strip()
+    (ROOT/'data/active-image').write_text(old+'\n')
+    backup=snapshot(c)
+    trial=ROOT/'data'/('trial-'+str(int(time.time())))
+    copy_state(backup/'state',trial)
+    n=name(c)+'-candidate'
+    try:
+        launch(c,candidate,n,trial,False);catalog(c,n)
+    finally:
+        subprocess.run(['podman','rm','--force',n],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        shutil.rmtree(trial)
+    down(c)
+    try:
+        launch(c,candidate);catalog(c)
+        (ROOT/'data/active-image').write_text(candidate+'\n')
+        print('Updated. Rollback snapshot:',backup)
+    except BaseException:
+        down(c)
+        failed=ROOT/'data'/('failed-'+str(int(time.time())))
+        (ROOT/'data/state').rename(failed)
+        copy_state(backup/'state',ROOT/'data/state')
+        launch(c,old)
+        raise RuntimeError('Update failed; previous image and state restored')
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command',choices=['init','build','up','down','status','logs','catalog','backup','update','rollback','mcp','lock'])
+    parser.add_argument('path',nargs='?')
+    args=parser.parse_args()
+    if args.command=='init':
+        for d in ['data','secrets','certs','backups']:(ROOT/d).mkdir(exist_ok=True,mode=0o700)
+        if not (ROOT/'.env').exists():shutil.copy2(ROOT/'.env.example',ROOT/'.env')
+        (ROOT/'.env').chmod(0o600)
+        for k in ['gateway-key','admin-key']:
+            p=ROOT/'secrets'/k
+            if not p.exists():p.write_text(secrets.token_hex(32)+'\n');p.chmod(0o600)
+        print('Initialized .env and private keys. Edit .env, then ./stack build && ./stack up');return
+    c=config()
+    if args.command=='mcp':
+        os.execvp('podman',['podman','exec','-i',name(c),'/opt/caveman/bin/caveman-mcp'])
+    if args.command=='logs':pod('logs','--tail','100',name(c));return
+    if args.command=='status':pod('ps','-a','--filter','name=^'+name(c)+'$');return
+    with (ROOT/'data/operation.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        if args.command=='build':build(c)
+        elif args.command=='up':
+            launch(c);catalog(c)
+            ident=pod('image','inspect',image_id(c),'--format','{{.Id}}',capture_output=True,text=True).stdout.strip()
+            (ROOT/'data/active-image').write_text(ident+'\n');print('Stack ready')
+        elif args.command=='down':down(c)
+        elif args.command=='catalog':catalog(c)
+        elif args.command=='backup':print(snapshot(c))
+        elif args.command=='update':update(c)
+        elif args.command=='rollback':
+            if not args.path:raise RuntimeError('Usage: ./stack rollback backups/TIMESTAMP')
+            b=Path(args.path).resolve()
+            if not (b/'state').is_dir() or not (b/'image').is_file():raise RuntimeError('Invalid backup')
+            old=(b/'image').read_text().strip();pod('image','exists',old)
+            down(c)
+            (ROOT/'data/state').rename(ROOT/'data'/('before-rollback-'+str(int(time.time()))))
+            copy_state(b/'state',ROOT/'data/state');launch(c,old)
+            (ROOT/'data/active-image').write_text(old+'\n');print('Restored',b)
+        elif args.command=='lock':
+            ca=bundle_ca();extra=[]
+            if ca:extra=['--volume',str(ca)+':/tmp/company-ca.pem:ro,z','--env','NODE_EXTRA_CA_CERTS=/tmp/company-ca.pem']
+            pod('run','--rm','--network',c.get('BUILD_NETWORK','slirp4netns'),'--volume',str(ROOT)+':/work:Z','--workdir','/work',*runtime_env(c),*extra,
+                'docker.io/library/node:24.14.1-bookworm-slim','npm','install','--package-lock-only','--ignore-scripts','--no-audit','--no-fund')
+
+if __name__=='__main__':
+    try:main()
+    except (RuntimeError,subprocess.CalledProcessError,BlockingIOError) as e:
+        # Avoid echoing command argv: environment flags can contain proxy passwords.
+        print(str(e) if isinstance(e,RuntimeError) else 'Operation failed; another operation may be active. Check local Podman status.',file=sys.stderr)
+        sys.exit(1)

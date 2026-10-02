@@ -1,0 +1,12 @@
+.git
+.env*
+secrets
+certs
+data
+backups
+exports
+node_modules
+tests
+docs
+*.log
+**/auth.json
