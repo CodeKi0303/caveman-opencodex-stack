@@ -1,5 +1,29 @@
 # 검증 기록
 
+## HTTP 복구 종단 간 확인
+
+실제 모델 호출과 압축·원문 복구를 함께 확인하려면 서버 호스트에서 다음을 실행합니다.
+인증 파일은 해당 클라이언트의 로컬 파일을 읽으며 컨테이너로 복사하지 않습니다.
+
+```bash
+python3 scripts/smoke.py --url http://192.168.50.61:18787/v1 --key-file secrets/gateway-key --auth-file /root/.codex/auth.json --state-dir data/state --mcp
+```
+
+이 명령은 합성 데이터로 모델 요청을 한 번 보내므로 해당 계정의 사용량을 소비합니다.
+Responses/SSE 완료, Caveman 압축 기록, CCR 원문, 인증된 HTTP MCP의 동일 원문 반환을 확인합니다.
+출력에는 인증 값과 원문을 포함하지 않습니다.
+
+## 0.2.0 클라이언트 예약 테스트 (2026-10-03)
+
+Windows와 WSL Ubuntu 24.04에서 `node --test tests/schedule.test.mjs`를 실행했습니다.
+Windows는 6개 통과·Linux 전용 1개 제외, WSL은 5개 통과·Windows 전용 2개 제외입니다.
+사용자 범위·경로 인용·Codex 홈별 동일 예약 갱신·소유권 확인·모의 설치/삭제와
+예약 실행기의 클라이언트 인수·종료 코드·마지막 로그 교체를 검사했습니다.
+Windows PowerShell 5.1에서 BOM 없는 UTF-8 설정의 한글 경로로 테스트 실행기를 호출하는 것도 확인했습니다.
+테스트는 실제 Scheduled Task나 systemd 예약을 등록하지 않습니다.
+WSL의 `systemd-analyze calendar`로 15분 및 매시간 달력 표현식을 확인했습니다.
+실제 로그인/재부팅 후 실행과 실제 예약 등록은 이 테스트 결과에 포함하지 않습니다.
+
 2026-10-02, Ubuntu 26.04 amd64 / Podman 5.7.0에서 수행했습니다.
 
 - 실제 이미지 빌드 및 Caveman 서명/checksum 검증 설치 성공.

@@ -9,6 +9,8 @@ Its MIT license covers this repository's original code only; upstream licenses r
 | Caveman CLI | npm `@caveman-ai/cli@1.3.4`, https://github.com/JuliusBrussee/caveman | package metadata declares MIT |
 | Caveman companion binaries | CLI's signed binary release, `bin-v1.1.7` | BSL-1.1 with Additional Use Grant; see `licenses/Caveman-proxy-LICENSE` and `licenses/Caveman-LICENSING.md` |
 | Codex CLI | npm `@openai/codex@0.160.0`, https://github.com/openai/codex | upstream Apache-2.0; preserve packaged notices |
+| MCP TypeScript SDK | npm `@modelcontextprotocol/sdk@1.30.0` | MIT; license retained in installed package |
+| TOML parser | npm `@iarna/toml@3.0.0` | ISC; license retained in installed package |
 | Node/Bun/base OS and transitive dependencies | Containerfile + package-lock.json | each component retains its own license |
 
 The pinned Caveman binary release is **not entirely open source**: its CLI/adoption surfaces

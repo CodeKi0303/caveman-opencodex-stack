@@ -1,8 +1,8 @@
 import http from 'node:http';
 import https from 'node:https';
 import {BlockList} from 'node:net';
-import {timingSafeEqual} from 'node:crypto';
-import {readFileSync, appendFileSync} from 'node:fs';
+import {timingSafeEqual, createHash} from 'node:crypto';
+import {readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {Transform} from 'node:stream';
 
@@ -44,9 +44,15 @@ export function requestMetadata(req) {
     account_id_present:typeof req.headers['chatgpt-account-id'] === 'string',
     gateway_key_present:typeof req.headers['x-caveman-gateway-key'] === 'string'};
 }
-export function createGateway({key, request = http.request, audit = () => {}, maxRequestBytes = MAX_REQUEST_BYTES, allowedAddress = addressPolicy(), tls, catalogPath} = {}) {
+export function createGateway({key, request = http.request, audit = () => {}, maxRequestBytes = MAX_REQUEST_BYTES, allowedAddress = addressPolicy(), tls, catalogPath, recoveryMcp} = {}) {
   validateLimit(maxRequestBytes);
   if (typeof key !== 'string' || key.length < 32) throw Error('Gateway key must be at least 32 characters');
+  let recovery = recoveryMcp;
+  let recoveryLoading;
+  let recoveryClosed = false;
+  const loadRecovery = () => recovery ? Promise.resolve(recovery) : recoveryLoading ??= import('./recovery-mcp.mjs')
+    .then(({createRecoveryMcp}) => { recovery = createRecoveryMcp(); return recovery; })
+    .finally(() => { recoveryLoading = undefined; });
   const sendError = (res, status, message, details = {}) => {
     if (res.writableEnded || res.destroyed) return;
     if (!res.headersSent) res.writeHead(status, {'content-type':'application/json'}).end(JSON.stringify({error:{message,...details}}));
@@ -61,10 +67,24 @@ export function createGateway({key, request = http.request, audit = () => {}, ma
     const supplied = req.headers['x-caveman-gateway-key'];
     if (typeof supplied !== 'string' || Buffer.byteLength(supplied) !== Buffer.byteLength(key) ||
         !timingSafeEqual(Buffer.from(supplied),Buffer.from(key))) return sendError(res,401,'Gateway key required');
-    if (req.method === 'GET' && req.url === '/v1/catalog') {
+    if (req.url === '/mcp') {
+      if (recoveryClosed) return sendError(res,503,'Recovery is shutting down');
+      void loadRecovery().then(async bridge => {
+        if (recoveryClosed) { await bridge.close(); return sendError(res,503,'Recovery is shutting down'); }
+        await bridge.handle(req,res);
+      }).catch(() => sendError(res,503,'Recovery backend unavailable'));
+      return;
+    }
+    if ((req.method === 'GET' || req.method === 'HEAD') && req.url === '/v1/catalog') {
       try {
         const data = readFileSync(catalogPath);
-        res.writeHead(200, {'content-type':'application/json', 'cache-control':'no-store'}).end(data);
+        const etag = '"' + createHash('sha256').update(data).digest('hex') + '"';
+        const headers = {'content-type':'application/json', 'cache-control':'private, no-cache',
+          etag, vary:'x-caveman-gateway-key'};
+        const matches = (req.headers['if-none-match'] ?? '').split(',')
+          .some(value => value.trim() === '*' || value.trim().replace(/^W\//,'') === etag);
+        if (matches) res.writeHead(304,headers).end();
+        else res.writeHead(200,{...headers,'content-length':data.length}).end(req.method === 'HEAD' ? undefined : data);
       } catch { sendError(res,503,'Run stack catalog first'); }
       return;
     }
@@ -144,6 +164,12 @@ export function createGateway({key, request = http.request, audit = () => {}, ma
     req.pipe(limiter).pipe(upstream);
   };
   const server = tls ? https.createServer(tls,handler) : http.createServer(handler);
+  server.closeRecovery = async () => {
+    recoveryClosed = true;
+    const bridge = recovery ?? await recoveryLoading?.catch(() => undefined);
+    await bridge?.close();
+  };
+  server.once('close', () => { void server.closeRecovery(); });
   // An upgraded socket leaves Node's HTTP request lifecycle. A peer resetting
   // that socket must not become an unhandled error that kills every LAN route.
   server.on('connection', socket => socket.on('error', () => socket.destroy()));
@@ -165,5 +191,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     audit:record=>console.log(JSON.stringify(record))
   });
   server.listen(8080,'0.0.0.0');
-  process.on('SIGTERM',()=>{server.close(); setTimeout(()=>server.closeAllConnections(),10000).unref();});
+  process.on('SIGTERM',()=>{
+    void server.closeRecovery();
+    server.close(); setTimeout(()=>server.closeAllConnections(),10000).unref();
+  });
 }

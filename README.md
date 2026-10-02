@@ -6,6 +6,7 @@ OpenCodex는 설정된 제공자·모델 정책에 따라 해당 모델 API로 �
 모든 입력이 압축되는 것은 아니며 압축 조건에 맞지 않는 내용은 유지합니다.
 호스트에는 **Podman 5+, slirp4netns, Python 3.11+, Git**이 필요합니다. 클라이언트 설정 도구는 Node.js 22.13+를 사용하며, 환경변수 기반 회사 프록시를 쓰는 클라이언트는 Node.js 24.14+를 권장합니다.
 Windows/WSL Codex는 HTTP(S)로 접속하므로 작업 파일과 도구 실행은 각 PC에 남습니다.
+개인 사용 기준으로 본인의 여러 클라이언트가 같은 게이트웨이와 압축 원문 DB를 공유합니다.
 
 ```text
 Windows / WSL / Linux Codex (각자의 로그인)
@@ -16,7 +17,8 @@ Windows / WSL / Linux Codex (각자의 로그인)
     ├─ POST /v1/responses → Caveman :8787 [입력 압축] → OpenCodex :10101
     ├─ 이미지·검색·compact → OpenCodex :10101
     ├─ GET /v1/models → OpenCodex :10101
-    └─ GET /v1/catalog → 공통 카탈로그 파일
+    ├─ GET /v1/catalog → 공통 카탈로그 파일 (ETag)
+    └─ /mcp → Caveman 원문 복구 도구 → 공유 CCR DB
 
 OpenCodex → 선택한 제공자의 모델 API (인터넷 / 사내 서버 / 호스트)
 
@@ -50,7 +52,9 @@ cd caveman-podman
 ```
 
 `init`은 `.env`, `secrets/gateway-key`, `secrets/admin-key`를 생성합니다. 기존 키는 덮어쓰지 않습니다.
-`up`은 세 프로세스의 준비 상태를 확인하고 공통 카탈로그를 생성합니다.
+`up`은 프록시의 준비 상태를 확인하고 공통 카탈로그를 생성합니다.
+컨테이너 안의 작업이 기본 15분마다 카탈로그를 갱신하므로 서버에 별도 타이머를 설치할 필요가 없습니다.
+서버에서 Codex `native-main` 로그인을 새로 만들 필요도 없습니다. 클라이언트의 기존 모델 인증을 전달합니다.
 
 기본 설정은 API `18787`, 관리 UI `20100`을 모든 IPv4 인터페이스에 공개합니다.
 `0.0.0.0`은 리스닝 주소이며 브라우저에서는 실제 서버 IP를 사용합니다.
@@ -66,6 +70,8 @@ ADMIN_PORT=20100
 | 용도 | 위 예시의 접속 주소 | 인증 |
 |---|---|---|
 | Codex 모델 연결 | `http://192.168.50.61:18787/v1` | 게이트웨이 키 + 모델 제공자 인증 |
+| 모델 카탈로그 | `http://192.168.50.61:18787/v1/catalog` | 동일한 게이트웨이 키 |
+| 원문 복구 MCP | `http://192.168.50.61:18787/mcp` | 동일한 게이트웨이 키 |
 | OpenCodex 관리 웹페이지 | `http://192.168.50.61:20100/` | `secrets/admin-key`의 관리자 토큰 |
 
 기존 `.env`는 `init`이 덮어쓰지 않으므로 직접 변경하고 `./stack down && ./stack up`으로 적용합니다.
@@ -76,14 +82,18 @@ ADMIN_PORT=20100
 
 ## 2. 클라이언트 연결과 모델 목록
 
-서버 담당자는 `secrets/gateway-key` 파일만 각 사용자에게 안전한 경로로 전달합니다.
-**관리자 키·사용자의 auth.json·CCR DB는 전달하지 않습니다.** 사용자는 자기 Codex에서 로그인합니다.
+서버의 `secrets/gateway-key` 파일을 본인의 Windows/WSL 클라이언트에 보관합니다.
+**관리자 키·사용자의 auth.json·CCR DB는 복사하지 않습니다.** 각 Codex 클라이언트에서 로그인합니다.
 
 Windows PowerShell / Linux / WSL에서 저장소를 clone하고 Codex를 완전히 닫은 다음:
 
 ```bash
+npm ci --ignore-scripts
 node scripts/client.mjs configure --url https://codex-proxy.example.com:18787/v1 --key-file /path/to/gateway-key
 ```
+
+`npm ci --ignore-scripts`는 클라이언트 설정 도구가 사용하는 고정 버전의 의존성을 설치합니다.
+예약 설치만으로 Node나 npm 의존성을 설치하지는 않습니다.
 
 Windows 예시:
 
@@ -91,12 +101,26 @@ Windows 예시:
 node .\scripts\client.mjs configure --url https://codex-proxy.example.com:18787/v1 --key-file C:\Users\me\caveman-private\gateway-key
 ```
 
-현재 사용자의 `CODEX_HOME` 또는 기본 `~/.codex`에 provider와 카탈로그를 연결합니다.
+현재 사용자의 `CODEX_HOME` 또는 기본 `~/.codex`에 provider·카탈로그·HTTP 복구 MCP를 연결합니다.
 필요하면 `--codex-home`으로 경로를 명시합니다. 기존 로그인·기본 모델은 유지합니다.
 키는 사용자 Codex 설정 파일에 저장되며 터미널에 출력하지 않습니다. 변경 전 파일은
-`~/.codex/before-caveman-<시각>/`에 백업됩니다. 이미 provider가 있으면 `configure` 대신 `sync`를 사용하세요.
+`~/.codex/before-caveman-<시각>-<임의값>/`에 백업됩니다. 카탈로그만 갱신할 때는 `sync`를 사용하세요.
 
-새 모델이 나왔을 때:
+| 명령 | 용도 |
+|---|---|
+| `configure` | 기본 `caveman_stack` provider를 만들거나 갱신하고 선택합니다. 카탈로그와 `/mcp`도 연결합니다. |
+| `reconfigure` | 현재 선택된 기존 provider의 주소·게이트웨이 키와 `/mcp`를 갱신합니다. 다른 provider로 선택을 바꾸지 않습니다. `--provider ID`로 수정 대상을 명시할 수 있습니다. |
+| `sync` | 카탈로그만 동기화합니다. provider 주소·인증·MCP 설정은 수정하지 않습니다. |
+| `doctor` | 설정 불일치, 로컬 로그인 메타데이터, 카탈로그 접근과 MCP 도구 목록을 읽기 전용으로 확인합니다. 모델 추론이나 자동 로그인은 수행하지 않습니다. |
+
+이전에 `8787`로 연결했거나 게이트웨이 키를 교체했다면 `sync` 대신 연결 설정부터 갱신합니다:
+
+```bash
+node scripts/client.mjs reconfigure --url http://192.168.50.61:18787/v1 --key-file /path/to/gateway-key --codex-home /path/to/.codex
+node scripts/client.mjs doctor --url http://192.168.50.61:18787/v1 --key-file /path/to/gateway-key --codex-home /path/to/.codex
+```
+
+서버 카탈로그는 자동으로 갱신됩니다. 즉시 갱신하거나 수동으로 가져오려면:
 
 ```bash
 # 서버: 현재 OpenCodex가 제공하는 목록을 공통 카탈로그로 갱신
@@ -110,6 +134,29 @@ node scripts/client.mjs sync --url https://codex-proxy.example.com:18787/v1 --ke
 Desktop도 업데이트해야 할 수 있습니다. `catalog`는 **설치된 OpenCodex가 제공하는 목록**을 내보내며,
 계정별 실제 사용 권한을 보장하지 않습니다. 새 모델을 모르는 버전이라면 다음 업데이트 절차를 먼저 실행하세요.
 카탈로그의 시스템 지침을 직접 생성하거나 다른 모델 행을 복제하지 않습니다.
+카탈로그 API는 `ETag`를 반환하고, 같은 버전의 `If-None-Match` 요청에는 본문 없이 `304`를 반환합니다.
+클라이언트 `sync`도 변경이 없으면 설정·캐시·백업을 다시 쓰지 않습니다. 통신이나 카탈로그 검증이 실패하면 기존 파일을 유지합니다.
+
+클라이언트도 자동으로 다운로드하게 하려면 **각 Windows/WSL 환경에서 한 번** 예약을 등록합니다:
+
+```powershell
+node .\scripts\schedule.mjs install --url http://192.168.50.61:18787/v1 --key-file "C:\Users\me\caveman-private\gateway-key" --codex-home "C:\Users\me\.codex"
+node .\scripts\schedule.mjs status --codex-home "C:\Users\me\.codex"
+```
+
+```bash
+node scripts/schedule.mjs install --url http://192.168.50.61:18787/v1 --key-file "$HOME/.config/caveman/gateway-key" --codex-home "$HOME/.codex"
+node scripts/schedule.mjs status --codex-home "$HOME/.codex"
+```
+
+기본 주기는 15분입니다. Windows는 현재 사용자 로그인 시 및 주기적으로 창 없이 실행하고,
+Linux/WSL은 사용자 systemd 타이머의 시작·주기 실행과 `Persistent=true`를 사용합니다.
+Windows와 WSL의 Codex 홈은 별개이므로 사용하는 환경마다 등록합니다. WSL 배포판이 종료된 동안에는 실행되지 않습니다.
+예약 설치는 위 `install` 명령을 직접 실행할 때만 이루어집니다. 같은 Codex 홈으로 다시 실행하면 기존 예약을 갱신합니다.
+저장소나 Node 실행 파일을 옮긴 후에도 다시 등록하세요. **자동 다운로드가 실행 중인 Codex를 자동 재시작하지는 않습니다.**
+
+예약 해제는 `node scripts/schedule.mjs remove --codex-home <경로>`입니다.
+자세한 로그·주기·WSL 전제조건은 [운영 가이드](docs/OPERATIONS.md#클라이언트-카탈로그-자동-동기화)를 참고하세요.
 
 ## 3. 설정 위치
 
@@ -123,6 +170,8 @@ Desktop도 업데이트해야 할 수 있습니다. `catalog`는 **설치된 Ope
 | 관리 UI 공개 인터페이스 | `ADMIN_BIND_ADDRESS` (빈 값이면 `BIND_ADDRESS`와 동일) |
 | 관리자 UI 토큰 | `secrets/admin-key` (필요할 때 로컬에서 확인) |
 | 공통 카탈로그 | `data/state/catalog/models.json`, `./stack catalog`로 생성 |
+| 서버 카탈로그 갱신 주기 | `.env`의 `CATALOG_REFRESH_SECONDS=900` (최소 60초) |
+| 클라이언트 동기화 예약 | `scripts/schedule.mjs install/status/remove`, 사용자 Codex 홈별 관리 |
 | 압축 원문 DB | `data/state/caveman/ccr.db` |
 | 로그 | `./stack logs` |
 
@@ -169,7 +218,23 @@ OpenCodex에 외부 제공자를 추가할 때는 제공자의 URL·API 형식(�
 ## 6. 원문 복구와 지원 범위
 
 입력 압축과 출력 축약 스킬은 별개입니다. 출력용 Caveman 스킬은 이 저장소가 Codex에 강제로 설치하지 않습니다.
-같은 Linux 호스트의 Codex는 아래 stdio MCP를 등록할 수 있습니다:
+Windows/WSL에서도 게이트웨이의 Streamable HTTP MCP로 원문을 복구할 수 있습니다.
+위의 `configure` 또는 `reconfigure`가 같은 키로 `[mcp_servers.caveman]`을 자동 설정하므로 별도 등록은 필요 없습니다.
+수동으로 환경변수 인증을 사용하려는 경우, 게이트웨이 키를 `CAVEMAN_GATEWAY_KEY`에 설정하고 Codex가 그 환경을 상속하도록 시작한 뒤
+기존 MCP 테이블을 아래 형태로 편집합니다. 같은 테이블을 중복 추가하지 마세요. `/v1/mcp`가 아닌 **`/mcp`**입니다.
+
+```toml
+[mcp_servers.caveman]
+url = "http://192.168.50.61:18787/mcp"
+env_http_headers = { "x-caveman-gateway-key" = "CAVEMAN_GATEWAY_KEY" }
+```
+
+키는 모델 연결·카탈로그 다운로드와 같습니다. 키 자체를 명령 인수에 넣지 마세요.
+환경변수 대신 `http_headers`의 같은 헤더명으로 사용자 설정 파일에 저장할 수도 있습니다.
+서버가 요구하는 헤더는 `x-caveman-gateway-key`이므로 `bearer_token_env_var`만으로 대체할 수 없습니다.
+저장 후 Codex/MCP 연결을 재시작합니다. 공식 지원 설정은 [OpenAI MCP 문서](https://developers.openai.com/codex/mcp/)를 참고하세요.
+
+같은 Linux 호스트에서는 기존 stdio 연결도 사용할 수 있습니다:
 
 ```toml
 [mcp_servers.caveman]
@@ -177,16 +242,11 @@ command = "/absolute/path/to/caveman-podman/stack"
 args = ["mcp"]
 ```
 
-WSL/Windows가 다른 호스트에 있으면 HTTP 모델 연결만으로 이 로컬 MCP를 실행할 수 없습니다.
-SSH stdio MCP나 별도로 인증된 MCP 전송을 연결해야 합니다. 모델 요청용 SSH 터널은 필요하지 않습니다.
-예: `ssh -T user@server /absolute/path/to/caveman-podman/stack mcp`.
-이는 원격 MCP 명령만 실행하며 Windows 작업을 원격 작업으로 전환하지 않습니다.
+HTTP MCP는 서버의 원문 복구 도구를 호출하며, Windows/WSL 작업 파일의 실행 위치를 바꾸지 않습니다.
+**원문 DB와 복구 도구에는 사용자별 격리가 없습니다.** 같은 키를 가진 클라이언트는 개인용 공유 CCR 원문에 접근합니다.
+서로 다른 사용자/팀을 분리해야 한다면 별도 컨테이너·키·포트·데이터 디렉터리로 운용하세요.
 
-**원문 DB와 복구 도구에는 사용자별 격리가 없습니다.** 회사에서 서로 다른 사용자/팀의 원문을 분리하려면
-사용자 또는 보안 경계별로 별도 clone·컨테이너·키·포트·데이터 디렉터리를 운용하세요.
-공유 키 하나로 다중 사용자 접근 권한·감사 체계를 제공하는 제품은 아닙니다.
-
-게이트웨이는 Responses HTTP/SSE, 모델 목록, 이미지 generations/edits, alpha/search, responses/compact만 연결합니다.
+게이트웨이는 Responses HTTP/SSE, 모델 목록·카탈로그, 원문 복구 MCP, 이미지 generations/edits, alpha/search, responses/compact를 연결합니다.
 경로를 연결했다는 것과 upstream이 지원한다는 것은 다릅니다. WebSocket·음성 및 모든 OpenAI API의 포괄 지원은 하지 않습니다.
 
 ## 7. 검증과 GitHub 배포
@@ -213,3 +273,4 @@ git push -u origin main
 ```
 
 서버 재부팅 시 자동 시작 예시는 [운영 가이드](docs/OPERATIONS.md)에 있습니다.
+버전별 변경은 [변경 기록](CHANGELOG.md)을 참고하세요.
