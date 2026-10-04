@@ -1,5 +1,16 @@
 # 검증 기록
 
+## 0.3.0 수동 동기화 전환 (2026-10-04)
+
+- Windows 전체 Node 테스트 45개 통과·2개 제외, WSL 변경 기능 테스트 19개 및 Python 수명 주기 테스트 3개 통과. GitHub Windows/Linux CI 성공.
+- 실제 Windows PowerShell 5.1 GUI 실행 경로와 수동 CLI가 같은 설정으로 정상 동기화. 숨김 런처에서도 결과 창이 표시되는 것을 확인.
+- Windows 바탕화면 바로가기 등록. Windows·WSL·원격 Linux 예약 제거 후 수동 동기화 성공.
+- 서버 `stack update` 성공, 컨테이너 healthy. 시작 로그 `catalog_startup_finished: ok=true` 확인 후 카탈로그 작업 프로세스가 종료됨.
+- 실제 GPT-6.1 Sol 응답·Caveman 압축·HTTP MCP 원문 66,392바이트 복구 성공.
+- 연결 정보는 예약과 분리된 로컬 파일에 보관. 실제 키·토큰은 Git 포함 파일에서 검출되지 않음.
+
+아래 0.2.0 예약 기록은 당시의 검증 이력이며 현재 운영 정책은 수동 동기화입니다.
+
 ## 0.2.0 실제 적용 (2026-10-03)
 
 - GitHub Actions의 Windows·Linux 검증 모두 성공. 각 OS에서 Node 42개 통과·다른 OS 전용 2개 제외, Linux Python 3개 통과.
