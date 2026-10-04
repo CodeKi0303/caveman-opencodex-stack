@@ -15,4 +15,7 @@ exports/
 auth.json
 models_cache.json
 opencodex-catalog.json
+caveman-client.json
+caveman-catalog-sync.json
+*.lnk
 __pycache__/

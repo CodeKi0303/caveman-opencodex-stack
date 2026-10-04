@@ -24,14 +24,14 @@ function stop(code=0) {
   timer.unref();
   Promise.all(children.map(p=>p.exitCode!==null?Promise.resolve():new Promise(r=>p.once('exit',r)))).then(()=>process.exit(code));
 }
-for(const [bin,args] of [
+for(const [bin,args,required=true] of [
   ['/app/node_modules/.bin/bun',['/app/src/opencodex.ts']],
   ['/opt/caveman/bin/caveman-proxy',[]],
   [process.execPath,['/app/src/gateway.mjs']],
-  [process.execPath,['/app/src/catalog-refresh.mjs']]
+  [process.execPath,['/app/src/catalog-refresh.mjs'],false]
 ]) {
   const p=spawn(bin,args,{env,stdio:['ignore','inherit','inherit']});children.push(p);
-  p.once('error',()=>{console.error('Component failed to start');stop(1);});
-  p.once('exit',()=>{if(!stopping){console.error('Component exited; stopping stack');stop(1);}});
+  p.once('error',()=>{console.error(required?'Component failed to start':'Startup catalog refresh unavailable');if(required)stop(1);});
+  p.once('exit',()=>{if(required&&!stopping){console.error('Component exited; stopping stack');stop(1);}});
 }
 process.on('SIGTERM',()=>stop());process.on('SIGINT',()=>stop());

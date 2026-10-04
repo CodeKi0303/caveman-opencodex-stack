@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {randomUUID} from 'node:crypto';
+import {setTimeout as delay} from 'node:timers/promises';
 
 const MAX_CATALOG_BYTES = 16 * 1024 * 1024;
 
@@ -39,35 +40,14 @@ export async function refreshCatalog({url, output, fetchImpl = fetch, signal}) {
   return {changed: true, models: catalog.models.length};
 }
 
-export async function runCatalogWorker(options, {intervalSeconds = 900, log = console.log} = {}) {
-  if (!Number.isSafeInteger(intervalSeconds) || intervalSeconds < 60)
-    throw Error('CATALOG_REFRESH_SECONDS must be an integer of at least 60');
-  let stopping = false;
-  let wake;
-  let controller;
-  const stop = () => { stopping = true; controller?.abort(); wake?.(); };
-  process.once('SIGTERM', stop);
-  process.once('SIGINT', stop);
-  try {
-    while (!stopping) {
-      controller = new AbortController();
-      let failed = false;
-      try {
-        const result = await refreshCatalog({...options,
-          signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15000)])});
-        if (result.changed) log(JSON.stringify({event: 'catalog_refreshed', ...result}));
-      } catch {
-        failed = true;
-        if (!stopping) log(JSON.stringify({event: 'catalog_refresh_failed', last_good_preserved: true}));
-      }
-      if (!stopping) await new Promise(resolve => {
-        const timer = setTimeout(resolve, (failed ? Math.min(intervalSeconds, 30) : intervalSeconds) * 1000);
-        wake = () => { clearTimeout(timer); resolve(); };
-      });
+export async function refreshCatalogAtStartup(options, {attempts = 3, retryMs = 2000, wait = delay} = {}) {
+  if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > 5) throw Error('Invalid startup attempts');
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try { return {ok: true, ...await refreshCatalog(options)}; }
+    catch {
+      if (attempt === attempts) return {ok: false, last_good_preserved: true};
+      await wait(retryMs);
     }
-  } finally {
-    process.removeListener('SIGTERM', stop);
-    process.removeListener('SIGINT', stop);
   }
 }
 
@@ -81,5 +61,5 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   if (process.argv.includes('--once')) {
     try { console.log(JSON.stringify(await refreshCatalog(options))); }
     catch { console.error('Catalog refresh failed; last good file preserved'); process.exitCode = 1; }
-  } else await runCatalogWorker(options, {intervalSeconds: Number(process.env.CATALOG_REFRESH_SECONDS || 900)});
+  } else console.log(JSON.stringify({event: 'catalog_startup_finished', ...await refreshCatalogAtStartup(options)}));
 }
