@@ -35,60 +35,42 @@ systemctl --user enable --now caveman-stack.service
 이 oneshot unit은 부팅 시작/정지를 제공합니다. 컨테이너 crash의 자동 복구·알림은 포함하지 않습니다.
 운영 감시가 필요한 조직은 자체 Podman Quadlet/모니터링 기준에 통합하세요.
 
-## 클라이언트 카탈로그 자동 동기화
+## 클라이언트 카탈로그 동기화
 
-서버는 컨테이너의 카탈로그 작업이 시작 시와 기본 15분마다 OpenCodex 목록을 읽습니다.
-`.env`의 `CATALOG_REFRESH_SECONDS`로 주기를 변경합니다(기본 `900`, 최소 `60`).
-조회·검증 실패 시 마지막 정상 파일을 유지하고 최대 30초 후 재시도하며, 내용이 같으면 다시 쓰지 않습니다.
-즉시 갱신은 `./stack catalog`입니다. 서버용 cron/systemd 타이머를 추가할 필요가 없습니다.
+기본은 서버 기동·배포 시 갱신과 클라이언트 수동 다운로드입니다.
+서버의 일회성 시작 작업은 실패 시 최대 3회 시도하고 종료합니다.
+기존 정상 파일은 유지하며, 갱신 실패 때문에 실행 중인 모델 서비스 전체를 종료하지 않습니다.
+`stack up/update`는 준비 상태 이후 카탈로그를 별도로 확인합니다.
+서버 모델 설정을 바꾼 뒤에는 `./stack catalog`를 실행하세요.
+`CATALOG_REFRESH_SECONDS`는 0.3.0부터 사용하지 않습니다.
 
-클라이언트는 `configure`로 최초 연결한 뒤, 사용하는 **각 Codex 홈**에 별도 예약을 설치합니다:
-
-```bash
-node scripts/schedule.mjs install --url http://192.168.50.61:18787/v1 --key-file /absolute/path/gateway-key --codex-home /absolute/path/.codex
-node scripts/schedule.mjs status --codex-home /absolute/path/.codex
-node scripts/schedule.mjs remove --codex-home /absolute/path/.codex
-```
-
-경로에 공백이 있으면 쉘에 맞게 따옴표로 감쌉니다. 예약 명령줄에는 비밀 키 값이 아닌 파일 경로만 들어갑니다.
-`--interval-minutes`는 기본 `15`이며, 60의 양의 약수인 분 단위를 지원합니다(예: `5`, `10`, `15`, `30`, `60`).
-같은 Codex 홈으로 `install`을 다시 실행하면 주소·키 경로·주기를 갱신합니다. 예약 이름에는 홈 경로의 해시가 포함되어 중복 생성을 피합니다.
-설치·삭제는 명시적인 명령에서만 실행하며 테스트와 모듈 import는 예약을 만들지 않습니다.
-
-| 환경 | 실행 방식 | 동작 조건 |
-|---|---|---|
-| Windows | 현재 사용자, 제한 권한 Scheduled Task; PowerShell `-WindowStyle Hidden` | 사용자 로그인 시 + 주기 실행. 관리자·SYSTEM·사용자 암호를 사용하지 않습니다. |
-| Linux/WSL | `~/.config/systemd/user/` 아래 service/timer (`XDG_CONFIG_HOME` 지원) | 사용자 systemd 시작 시 + 달력 기반 주기, `Persistent=true`로 중단 중 지난 예약을 시작 후 보충합니다. |
-
-Windows에서는 로그인한 사용자 세션이 필요합니다. Linux에서는 실행 중인 사용자 systemd 관리자가 필요합니다.
-WSL은 systemd가 활성화된 배포판에서 등록하세요. WSL이 꺼진 동안에는 실행되지 않으며,
-Windows의 예약이 WSL 배포판을 자동으로 부팅하지는 않습니다. 로그아웃 중에도 Linux 사용자 서비스를 유지하려면
-관리자가 해당 사용자에 대한 linger를 별도로 설정해야 합니다.
-
-동기화는 셸 초기화 파일을 읽지 않고 절대 경로의 Node와 `scripts/client.mjs sync`를 실행합니다.
-회사 프록시·추가 CA 환경변수는 예약 작업/사용자 systemd 환경에도 전달되어야 합니다.
-저장소·Node·키 파일의 경로를 옮기면 `install`을 다시 실행하세요.
-
-설치 기록은 `<CODEX_HOME>/caveman-sync-schedule/config.json`, 마지막 실행 시각·종료 코드·출력은
-같은 디렉터리의 `last-run.json`에 기록합니다. 이 로그는 매번 교체되어 누적되지 않습니다.
-`status`는 Windows 예약 상태/최근 결과 또는 systemd 활성 상태/다음 실행 시간을 보여줍니다.
-`remove`는 이 도구가 소유한 예약과 기록만 제거하고 Codex 설정·카탈로그·키 파일을 유지합니다.
-
-`sync`는 ETag로 변경 여부를 확인하고 내용이 같으면 설정·캐시·백업을 다시 쓰지 않습니다.
-기존 주소·키·MCP가 잘못되어도 자동 동기화는 연결 설정을 바꾸지 않습니다. 이 경우 다음을 실행합니다:
+최초 `configure` 또는 기존 연결의 `reconfigure`가 별도 `caveman-client.json`을 저장합니다.
+이 파일은 예약 설정과 독립적이며 URL·키 파일 경로·Codex 홈·Node 실행 경로만 포함합니다.
 
 ```bash
 node scripts/client.mjs reconfigure --url http://192.168.50.61:18787/v1 --key-file /absolute/path/gateway-key --codex-home /absolute/path/.codex
-node scripts/client.mjs doctor --url http://192.168.50.61:18787/v1 --key-file /absolute/path/gateway-key --codex-home /absolute/path/.codex
+npm run sync -- --codex-home /absolute/path/.codex
+node scripts/schedule.mjs remove --codex-home /absolute/path/.codex
 ```
 
-`reconfigure`는 현재 선택된 기존 provider를 수정합니다. 다른 항목을 수정하려면 `--provider ID`를 추가하며,
-그 경우 현재 provider 선택은 그대로 유지됩니다. `doctor`는 파일을 수정하지 않고 로그인 메타데이터·카탈로그·MCP 연결을 확인합니다.
+위 순서로 기존 Windows 작업 및 Linux/WSL 사용자 타이머를 전환합니다.
+예약 제거는 Codex 설정·로그인·카탈로그·키·수동 설정을 지우지 않습니다.
+예약을 제거해도 다른 사용자 서비스가 사용할 수 있는 systemd linger 설정은 변경하지 않습니다.
 
-`model_catalog_json`은 HTTP URL이 아닌 **로컬 JSON 파일 경로**이며 Codex 시작 시 읽습니다.
-자동 다운로드 후에도 실행 중인 Codex 앱/CLI의 카탈로그가 바뀌었다고 보장할 수 없습니다.
-새 모델을 사용할 때 Codex를 완전히 재시작하세요. Windows와 WSL은 각각의 홈·프로세스를 확인합니다.
-근거: [OpenAI 설정 레퍼런스](https://developers.openai.com/codex/config-reference/).
+Windows의 `Sync-Catalog.vbs`는 숨김 PowerShell로 GUI를 열어 즉시 한 번 동기화합니다.
+`지금 동기화`로 재시도할 수 있고, 결과를 확인한 뒤 창을 닫습니다. 실행 중에는 중복 버튼 입력과
+창 닫기를 제한하며, 네트워크 요청에 제한 시간을 적용합니다. GUI는 Windows 홈만 대상으로 합니다.
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-shortcut.ps1`로 바탕화면 바로가기를 만듭니다.
+콘솔에서는 `npm run sync`, Node만 설치된 환경에서는 `node scripts/manual-sync.mjs`를 사용합니다.
+
+변경 없는 동기화는 ETag/304를 사용하며 파일·캐시·백업을 다시 쓰지 않습니다.
+네트워크·인증·검증 실패 시 마지막 정상 파일을 보존합니다. 실행 중인 Codex가 새 목록을
+다시 읽도록 변경이 있을 때만 재시작을 안내하며, 앱을 자동으로 종료하지 않습니다.
+
+명시적으로 자동 다운로드를 원하는 사용자에게만 기존 `schedule.mjs install/status/remove`를 제공합니다.
+설치 시 `--url`, `--key-file`, `--codex-home`을 지정하고 필요하면 `--interval-minutes`를 설정합니다.
+이 선택 기능은 기본 15분, Windows 사용자 예약 또는 Linux/WSL 사용자 systemd 타이머를 사용합니다.
+WSL 종료 중에는 실행되지 않습니다. 기본 배포 절차에서는 이 기능을 호출하지 않습니다.
 
 ## 원문 복구 MCP
 

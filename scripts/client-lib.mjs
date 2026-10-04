@@ -235,6 +235,11 @@ async function execute(argv,fetchFn) {
   }
   const metaAfter=JSON.stringify({url:base,etag:fetched.etag,catalogSha256:digest(data)})+'\n';
   const planned=[{file:metaFile,before:metaBefore,after:metaAfter}];
+  if(configured) {
+    const settingsFile=path.join(home,'caveman-client.json');
+    planned.push({file:settingsFile,before:read(settingsFile),after:JSON.stringify({version:1,
+      url:base,keyFile:path.resolve(opts['key-file']),codexHome:home,node:process.execPath},null,2)+'\n'});
+  }
   if(catalogChanged) {
     planned.push({file:catalogFile,before:catalogBefore,after:data},
       {file:cacheFile,before:cacheBefore,after:JSON.stringify({fetched_at:'2000-01-01T00:00:00Z',client_version:'0.0.0',models:fetched.catalog.models})+'\n'});

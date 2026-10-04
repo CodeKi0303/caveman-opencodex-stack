@@ -53,7 +53,7 @@ cd caveman-podman
 
 `init`은 `.env`, `secrets/gateway-key`, `secrets/admin-key`를 생성합니다. 기존 키는 덮어쓰지 않습니다.
 `up`은 프록시의 준비 상태를 확인하고 공통 카탈로그를 생성합니다.
-컨테이너 안의 작업이 기본 15분마다 카탈로그를 갱신하므로 서버에 별도 타이머를 설치할 필요가 없습니다.
+카탈로그는 기동·업데이트 시 한 번 갱신합니다. 컨테이너의 초기 시도는 최대 3회 후 종료하며, 주기적인 갱신 작업은 없습니다.
 서버에서 Codex `native-main` 로그인을 새로 만들 필요도 없습니다. 클라이언트의 기존 모델 인증을 전달합니다.
 
 기본 설정은 API `18787`, 관리 UI `20100`을 모든 IPv4 인터페이스에 공개합니다.
@@ -120,7 +120,7 @@ node scripts/client.mjs reconfigure --url http://192.168.50.61:18787/v1 --key-fi
 node scripts/client.mjs doctor --url http://192.168.50.61:18787/v1 --key-file /path/to/gateway-key --codex-home /path/to/.codex
 ```
 
-서버 카탈로그는 자동으로 갱신됩니다. 즉시 갱신하거나 수동으로 가져오려면:
+서버 카탈로그는 기동·업데이트 시 갱신됩니다. 서버 모델 설정을 바꿨거나 즉시 갱신하려면:
 
 ```bash
 # 서버: 현재 OpenCodex가 제공하는 목록을 공통 카탈로그로 갱신
@@ -137,26 +137,36 @@ Desktop도 업데이트해야 할 수 있습니다. `catalog`는 **설치된 Ope
 카탈로그 API는 `ETag`를 반환하고, 같은 버전의 `If-None-Match` 요청에는 본문 없이 `304`를 반환합니다.
 클라이언트 `sync`도 변경이 없으면 설정·캐시·백업을 다시 쓰지 않습니다. 통신이나 카탈로그 검증이 실패하면 기존 파일을 유지합니다.
 
-클라이언트도 자동으로 다운로드하게 하려면 **각 Windows/WSL 환경에서 한 번** 예약을 등록합니다:
-
-```powershell
-node .\scripts\schedule.mjs install --url http://192.168.50.61:18787/v1 --key-file "C:\Users\me\caveman-private\gateway-key" --codex-home "C:\Users\me\.codex"
-node .\scripts\schedule.mjs status --codex-home "C:\Users\me\.codex"
-```
+기본 사용 방식은 **수동 동기화**입니다. `configure` 또는 `reconfigure`가
+`<CODEX_HOME>/caveman-client.json`에 서버 주소·키 파일 경로·Node 경로를 저장합니다.
+키 값과 로그인 정보는 이 파일에 넣지 않으며 Git에도 포함하지 않습니다.
 
 ```bash
-node scripts/schedule.mjs install --url http://192.168.50.61:18787/v1 --key-file "$HOME/.config/caveman/gateway-key" --codex-home "$HOME/.codex"
-node scripts/schedule.mjs status --codex-home "$HOME/.codex"
+npm run sync
+# 다른 Codex 홈을 사용하는 경우
+npm run sync -- --codex-home /path/to/.codex
 ```
 
-기본 주기는 15분입니다. Windows는 현재 사용자 로그인 시 및 주기적으로 창 없이 실행하고,
-Linux/WSL은 사용자 systemd 타이머의 시작·주기 실행과 `Persistent=true`를 사용합니다.
-Windows와 WSL의 Codex 홈은 별개이므로 사용하는 환경마다 등록합니다. WSL 배포판이 종료된 동안에는 실행되지 않습니다.
-예약 설치는 위 `install` 명령을 직접 실행할 때만 이루어집니다. 같은 Codex 홈으로 다시 실행하면 기존 예약을 갱신합니다.
-저장소나 Node 실행 파일을 옮긴 후에도 다시 등록하세요. **자동 다운로드가 실행 중인 Codex를 자동 재시작하지는 않습니다.**
+Windows에서는 저장소의 **`Sync-Catalog.vbs`를 더블클릭**합니다.
+콘솔 없이 결과 창이 열리고 즉시 동기화합니다. 변경이 있는 경우에만 Codex 재시작을 안내합니다.
+Windows Script Host와 Windows PowerShell 5.1이 필요합니다. Script Host를 차단한 PC에서는
+`npm run sync`를 사용하거나 PowerShell에서 `scripts/sync-gui.ps1`을 실행합니다.
+바탕화면 바로가기는 다음 명령으로 등록할 수 있습니다:
 
-예약 해제는 `node scripts/schedule.mjs remove --codex-home <경로>`입니다.
-자세한 로그·주기·WSL 전제조건은 [운영 가이드](docs/OPERATIONS.md#클라이언트-카탈로그-자동-동기화)를 참고하세요.
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-shortcut.ps1
+```
+
+이 GUI는 현재 Windows의 Codex 홈만 동기화합니다. WSL·원격 PC에서는 해당 환경에서
+`npm run sync` 또는 `node scripts/manual-sync.mjs`를 실행합니다.
+연결 정보를 바꾸거나 Node 경로를 옮기면 `reconfigure`를 다시 실행하세요.
+저장소를 옮긴 경우 기존 바로가기를 제거하고 새 위치에서 다시 등록합니다.
+
+0.2.0 예약 설치 사용자는 **reconfigure → 수동 동기화 확인 → 예약 제거** 순서로 전환합니다.
+`node scripts/schedule.mjs remove --codex-home <경로>`는 예약과 예약 전용 기록만 제거하며
+수동 설정·로그인·카탈로그·키는 유지합니다. 기본 설치·업데이트는 예약을 등록하지 않습니다.
+명시적으로 자동 갱신을 원하는 사용자를 위해 기존 `schedule.mjs install`은 선택 기능으로 유지합니다.
+자세한 절차는 [운영 가이드](docs/OPERATIONS.md#클라이언트-카탈로그-동기화)를 참고하세요.
 
 ## 3. 설정 위치
 
@@ -170,8 +180,8 @@ Windows와 WSL의 Codex 홈은 별개이므로 사용하는 환경마다 등록�
 | 관리 UI 공개 인터페이스 | `ADMIN_BIND_ADDRESS` (빈 값이면 `BIND_ADDRESS`와 동일) |
 | 관리자 UI 토큰 | `secrets/admin-key` (필요할 때 로컬에서 확인) |
 | 공통 카탈로그 | `data/state/catalog/models.json`, `./stack catalog`로 생성 |
-| 서버 카탈로그 갱신 주기 | `.env`의 `CATALOG_REFRESH_SECONDS=900` (최소 60초) |
-| 클라이언트 동기화 예약 | `scripts/schedule.mjs install/status/remove`, 사용자 Codex 홈별 관리 |
+| 서버 카탈로그 갱신 | 기동·업데이트 시 1회, 이후 `./stack catalog` |
+| 클라이언트 수동 동기화 | `npm run sync`, Windows `Sync-Catalog.vbs` 더블클릭 |
 | 압축 원문 DB | `data/state/caveman/ccr.db` |
 | 로그 | `./stack logs` |
 

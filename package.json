@@ -1,11 +1,12 @@
 {
   "name": "caveman-opencodex-podman",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "test": "node --test tests/*.test.mjs"
+    "test": "node --test tests/*.test.mjs",
+    "sync": "node scripts/manual-sync.mjs"
   },
   "dependencies": {
     "@bitkyc08/opencodex": "2.75.0",

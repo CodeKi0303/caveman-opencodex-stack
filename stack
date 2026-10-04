@@ -38,7 +38,7 @@ def image_id(c):
     return p.read_text().strip() if p.exists() else c['IMAGE']
 
 def runtime_env(c):
-    allowed={'HTTP_PROXY','HTTPS_PROXY','NO_PROXY','ALLOWED_CIDRS','MAX_REQUEST_BYTES','CAVEMAN_MODE','GATEWAY_TLS_CERT','GATEWAY_TLS_KEY','CATALOG_REFRESH_SECONDS'}
+    allowed={'HTTP_PROXY','HTTPS_PROXY','NO_PROXY','ALLOWED_CIDRS','MAX_REQUEST_BYTES','CAVEMAN_MODE','GATEWAY_TLS_CERT','GATEWAY_TLS_KEY'}
     return [a for k,v in c.items() if k in allowed and v for a in ['--env',k+'='+v]]
 
 def build_env(c):
