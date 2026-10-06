@@ -1,5 +1,13 @@
 # 변경 기록
 
+## 미출시 — Remote 호환 연결
+
+- 기본 `openai` provider를 유지하면서 Caveman 게이트웨이 키를 추가하는 loopback 브리지와 Windows/Linux/WSL 설치기를 추가합니다.
+- `configure --provider openai --bridge-url` 및 브리지 상태·실제 카탈로그 인증을 확인하는 `doctor`를 지원합니다.
+- 이미 설정된 기본 `openai` 연결은 일반 `configure` 재실행으로 사용자 정의 provider로 되돌리지 않습니다. 브리지 확인 실패 시 설정을 유지합니다.
+- Windows 숨김 런처 회귀 테스트를 CI에 포함하고, 서비스 재기동·업데이트와 기존 이력 이전의 범위를 문서화합니다.
+- 카탈로그 수동 동기화 정책을 유지합니다. 개인 세션 DB·이력 변환 도구·로그인·키는 배포에 포함하지 않습니다.
+
 ## 0.3.0 — 2026-10-04
 
 - 기본 동기화를 수동 방식으로 변경. configure/reconfigure에서 예약과 독립된 로컬 연결 정보를 저장합니다.

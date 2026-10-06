@@ -35,6 +35,30 @@ systemctl --user enable --now caveman-stack.service
 이 oneshot unit은 부팅 시작/정지를 제공합니다. 컨테이너 crash의 자동 복구·알림은 포함하지 않습니다.
 운영 감시가 필요한 조직은 자체 Podman Quadlet/모니터링 기준에 통합하세요.
 
+## Remote와 기본 openai 연결 운영
+
+Remote를 사용하는 클라이언트는 [README의 브리지 설치 절차](../README.md#windows에서-기본-openai-provider-사용)를 따릅니다.
+Windows는 로그인 예약 `Caveman Native OpenAI Bridge`, Linux/WSL은
+`caveman-native-bridge.service`가 로컬 브리지를 유지합니다. 이 프로세스는 모델 요청을
+전달하는 데 필요하며 주기적인 카탈로그 다운로드를 실행하지 않습니다.
+
+- Windows: `Get-ScheduledTask -TaskName 'Caveman Native OpenAI Bridge'`로 실행 상태 확인.
+- Linux root: `systemctl status caveman-native-bridge.service` 확인.
+- Linux/WSL 사용자: `systemctl --user status caveman-native-bridge.service` 확인.
+- 각 클라이언트: `client.mjs doctor --url <실제 게이트웨이 /v1 주소> --key-file <키 파일>`로 브리지·카탈로그·MCP 확인.
+
+`openai_base_url`은 해당 PC의 loopback 브리지입니다. `--url`은 브리지가 가리키는
+원격 게이트웨이 주소와 같아야 합니다. 서버 자체에서 실행하더라도 `BIND_ADDRESS`가 LAN IP라면
+`127.0.0.1:18787`로 바꾸면 접속할 수 없습니다. Windows와 WSL 포트는 각각 18788/18789처럼 구분합니다.
+
+브리지 업데이트는 Git 업데이트 후 해당 플랫폼 설치기를 다시 실행합니다. Linux는 런타임 복사본을
+사용하므로 `git pull`만으로 실행 코드가 교체되지 않습니다. 설치 후 `doctor`를 확인합니다.
+서버의 모델 처리 경로는 계속 Podman이며 클라이언트 브리지만 바뀌면 컨테이너 재빌드가 필요하지 않습니다.
+
+기존 대화의 provider 변경은 설치·업데이트에 포함하지 않습니다. 세션 DB와 JSONL 기록, byte offset의
+일관성이 필요한 별도 일회성 작업입니다. 이미 완료한 이력 변환을 재실행하지 말고 백업은 각 PC에 보관합니다.
+Android 목록 표시는 앱에서 연결을 다시 열어 확인하며, `doctor` 성공만으로 목록 표시까지 보장하지 않습니다.
+
 ## 클라이언트 카탈로그 동기화
 
 기본은 서버 기동·배포 시 갱신과 클라이언트 수동 다운로드입니다.
