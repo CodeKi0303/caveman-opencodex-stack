@@ -184,7 +184,14 @@ try {
         Wait-ForStoppedBridge $previousCommand $previousPort
     }
     if (@(Get-ListenerIds).Count -ne 0) { throw 'The requested bridge port is not available.' }
-    Write-Utf8File $configPath (([ordered]@{ upstreamUrl = $UpstreamUrl; keyFile = $KeyFile; port = $Port } | ConvertTo-Json) + "`n")
+    $nextConfig = [ordered]@{ upstreamUrl = $UpstreamUrl; keyFile = $KeyFile; port = $Port }
+    if (Test-Path -LiteralPath $configPath) {
+        $stored = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+        foreach ($field in @('compression', 'management', 'controlPort')) {
+            if ($stored.PSObject.Properties.Name -contains $field) { $nextConfig[$field] = $stored.$field }
+        }
+    }
+    Write-Utf8File $configPath (($nextConfig | ConvertTo-Json -Depth 5) + "`n")
     Write-Utf8File $launcherPath $launcher
     Write-Utf8File $manifestPath (([ordered]@{
         version = 1; managedBy = 'caveman-opencodex-stack'; codexHome = $CodexHome
