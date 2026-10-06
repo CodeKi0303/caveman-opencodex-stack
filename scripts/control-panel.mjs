@@ -59,6 +59,7 @@ export function createControlPanel({configPath,fetchFn=fetch,client=runClient,re
    const info=await gateway(next,'/stack-info');if(!info.capabilities?.compressionSwitch)throw Error('SERVER_UPGRADE_REQUIRED');
    const b=await fetchFn(`http://127.0.0.1:${before.port}/healthz`,{signal:AbortSignal.timeout(3000)}).then(r=>r.json());
    if(b.controlVersion!==1)throw Error('BRIDGE_UPGRADE_REQUIRED');
+   if(JSON.stringify(settings())!==JSON.stringify(before))throw Error('CONCURRENT_EDIT');
    const backup=path.join(path.dirname(configPath),'control-backups');fs.mkdirSync(backup,{recursive:true,mode:0o700});
    fs.copyFileSync(configPath,path.join(backup,'bridge-'+Date.now()+'.json'));
    atomic(configPath,next);
@@ -101,6 +102,7 @@ export function createControlPanel({configPath,fetchFn=fetch,client=runClient,re
    let bytes=0,chunks=[];for await(const chunk of req){bytes+=chunk.length;if(bytes>16384)return json(res,413,{error:'BODY_TOO_LARGE'});chunks.push(chunk);}
    const body=JSON.parse(Buffer.concat(chunks).toString());
    if(!body||typeof body!=='object'||Array.isArray(body))throw Error('INVALID_INPUT');
+   if(busy)return json(res,409,{error:'OPERATION_BUSY'});
    if(req.url==='/api/settings'){busy=true;try{return json(res,200,await save(body));}finally{busy=false;}}
    if(req.url==='/api/update'&&(!['caveman','opencodex'].includes(body.component)||!/^\d+\.\d+\.\d+$/.test(body.version??'')))throw Error('INVALID_VERSION');
    if(req.url==='/api/update'&&body.confirm!==true)throw Error('UPDATE_CONFIRMATION_REQUIRED');
