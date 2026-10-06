@@ -34,6 +34,12 @@ function apiBase(value) {
     fail('INVALID_URL','Expected an HTTP(S) API URL ending in /v1, without credentials, query or fragment.');
   return url.toString().replace(/\/$/,'');
 }
+function bridgeBase(value) {
+  const base=apiBase(value),url=new URL(base);
+  if(url.protocol!=='http:'||url.hostname!=='127.0.0.1'||url.pathname!=='/v1')
+    fail('INVALID_BRIDGE_URL','The native OpenAI bridge must use http://127.0.0.1:PORT/v1.');
+  return base;
+}
 const mcpUrl=base=>base.slice(0,-3)+'/mcp';
 function endpointEquals(actual,expected) {try{return apiBase(actual)===expected;}catch{return false;}}
 function keyIn(headers) {
@@ -44,44 +50,58 @@ function keyIn(headers) {
 function hasGatewayEnvHeader(headers) {
   return !!headers&&typeof headers==='object'&&Object.keys(headers).some(name=>name.toLowerCase()==='x-caveman-gateway-key');
 }
-function connectionReport(config,base,key,providerOverride) {
+function connectionReport(config,base,key,providerOverride,bridgeUrl) {
   const effective=effectiveConfig(config), id=providerOverride??effective.provider;
   const provider=config.model_providers?.[id],mcp=config.mcp_servers?.caveman,warnings=[];
-  if(!provider)warnings.push('selected_provider_not_configured');
-  if(!endpointEquals(provider?.base_url,base))warnings.push('provider_url_mismatch');
-  if(keyIn(provider?.http_headers)!==key)warnings.push('provider_gateway_key_mismatch');
-  if(hasGatewayEnvHeader(provider?.env_http_headers))warnings.push('provider_gateway_env_header_conflict');
-  if(provider?.wire_api!=='responses')warnings.push('provider_wire_api_mismatch');
-  if(provider?.requires_openai_auth!==true)warnings.push('provider_auth_mode_mismatch');
-  if(provider?.supports_websockets!==false)warnings.push('provider_websockets_not_disabled');
+  if(id==='openai') {
+    if(provider)warnings.push('reserved_openai_provider_override');
+    if(!bridgeUrl||!endpointEquals(config.openai_base_url,bridgeUrl))warnings.push('openai_bridge_url_mismatch');
+    if(process.env.OPENAI_BASE_URL&&!endpointEquals(process.env.OPENAI_BASE_URL,bridgeUrl))warnings.push('openai_base_url_environment_override');
+  } else {
+    if(!provider)warnings.push('selected_provider_not_configured');
+    if(!endpointEquals(provider?.base_url,base))warnings.push('provider_url_mismatch');
+    if(keyIn(provider?.http_headers)!==key)warnings.push('provider_gateway_key_mismatch');
+    if(hasGatewayEnvHeader(provider?.env_http_headers))warnings.push('provider_gateway_env_header_conflict');
+    if(provider?.wire_api!=='responses')warnings.push('provider_wire_api_mismatch');
+    if(provider?.requires_openai_auth!==true)warnings.push('provider_auth_mode_mismatch');
+    if(provider?.supports_websockets!==false)warnings.push('provider_websockets_not_disabled');
+    if(provider?.env_key||provider?.experimental_bearer_token)warnings.push('provider_has_additional_auth_override');
+  }
   const compression=(effective.profile?config.profiles?.[effective.profile]?.features?.enable_request_compression:undefined)??config.features?.enable_request_compression;
   if(compression!==false)warnings.push('request_compression_not_disabled');
   if(mcp?.url!==mcpUrl(base)||mcp?.command||mcp?.enabled===false)warnings.push('mcp_url_or_transport_mismatch');
   if(keyIn(mcp?.http_headers)!==key)warnings.push('mcp_gateway_key_mismatch');
   if(hasGatewayEnvHeader(mcp?.env_http_headers))warnings.push('mcp_gateway_env_header_conflict');
-  if(provider?.env_key||provider?.experimental_bearer_token)warnings.push('provider_has_additional_auth_override');
   if(providerOverride&&providerOverride!==effective.provider)warnings.push('updated_provider_is_not_selected');
   return {provider:id,selectedProvider:effective.provider,profile:effective.profile,warnings};
 }
 
-function configuredText(original,config,command,base,key,target,requestedProvider) {
+function configuredText(original,config,command,base,key,target,requestedProvider,bridgeUrl) {
   const effective=effectiveConfig(config);
   const id=requestedProvider??(command==='reconfigure'?effective.provider:'caveman_stack');
   if(typeof id!=='string'||!/^[A-Za-z0-9_-]{1,80}$/.test(id))fail('INVALID_PROVIDER','Provider ID must contain only letters, digits, underscores or hyphens.');
-  if(command==='reconfigure'&&!config.model_providers?.[id])fail('PROVIDER_NOT_FOUND','The selected provider is not configured. Use configure for a new provider or specify --provider.');
+  if(command==='reconfigure'&&id!=='openai'&&!config.model_providers?.[id])fail('PROVIDER_NOT_FOUND','The selected provider is not configured. Use configure for a new provider or specify --provider.');
   const changes=[],removePrefixes=[];
   const set=(p,value)=>changes.push({path:p,value});
   const catalogPath=effective.profile&&at(config,['profiles',effective.profile,'model_catalog_json'])!==undefined
     ?['profiles',effective.profile,'model_catalog_json']:['model_catalog_json'];
   set(catalogPath,target.replaceAll('\\','/'));
-  if(command==='configure')set(effective.profile?['profiles',effective.profile,'model_provider']:['model_provider'],id);
+  if(command==='configure') {
+    set(effective.profile?['profiles',effective.profile,'model_provider']:['model_provider'],id);
+    if(id==='openai'&&effective.profile)set(['model_provider'],id);
+  }
   if(command==='configure'||command==='reconfigure') {
     set(effective.profile&&at(config,['profiles',effective.profile,'features','enable_request_compression'])!==undefined
       ?['profiles',effective.profile,'features','enable_request_compression']:['features','enable_request_compression'],false);
     const p=['model_providers',id],m=['mcp_servers','caveman'];
-    if(!config.model_providers?.[id]?.name)set([...p,'name'],'Caveman + OpenCodex');
-    for(const [k,v] of Object.entries({base_url:base,wire_api:'responses',requires_openai_auth:true,supports_websockets:false}))set([...p,k],v);
-    for(const parent of [p,m]) {
+    if(id==='openai') {
+      set(['openai_base_url'],bridgeUrl);
+      removePrefixes.push(p);
+    } else {
+      if(!config.model_providers?.[id]?.name)set([...p,'name'],'Caveman + OpenCodex');
+      for(const [k,v] of Object.entries({base_url:base,wire_api:'responses',requires_openai_auth:true,supports_websockets:false}))set([...p,k],v);
+    }
+    for(const parent of id==='openai'?[m]:[p,m]) {
       for(const existing of Object.keys(at(config,[...parent,'http_headers'])??{}))
         if(existing.toLowerCase()==='x-caveman-gateway-key'&&existing!=='x-caveman-gateway-key')set([...parent,'http_headers',existing],REMOVE);
       set([...parent,'http_headers','x-caveman-gateway-key'],key);
@@ -179,11 +199,28 @@ async function inspectMcp(url,key,fetchFn) {
   finally {try{await client?.close();}catch{}}
 }
 
+async function inspectBridge(url,base,fetchFn) {
+  if(!url)return {ok:false,error:'BRIDGE_URL_MISSING'};
+  try {
+    const response=await fetchFn(url.slice(0,-3)+'/healthz',{headers:{},redirect:'error',signal:AbortSignal.timeout(5000)});
+    if(!response.ok)return {ok:false,url,error:'BRIDGE_HTTP_'+response.status};
+    const health=await response.json();
+    if(health.service!=='caveman-native-bridge'||health.ok!==true||health.status!=='ok')return {ok:false,url,error:'BRIDGE_HEALTH_INVALID'};
+    if(!endpointEquals(health.upstream,base))return {ok:false,url,error:'BRIDGE_UPSTREAM_MISMATCH'};
+    const catalog=await fetchFn(url+'/catalog',{headers:{},redirect:'error',signal:AbortSignal.timeout(15000)});
+    if(!catalog.ok)return {ok:false,url,upstreamMatches:true,error:'BRIDGE_CATALOG_HTTP_'+catalog.status};
+    let models;
+    try {models=validateCatalog(await catalog.json()).models.length;}
+    catch {return {ok:false,url,upstreamMatches:true,error:'BRIDGE_CATALOG_INVALID'};}
+    return {ok:true,url,upstreamMatches:true,catalogAvailable:true,models};
+  } catch {return {ok:false,url,error:'BRIDGE_UNREACHABLE'};}
+}
+
 function parseArgs(argv) {
   const [command,...args]=argv;
   if(command==='--help'||command==='help')return {help:true};
-  if(!commands.includes(command))fail('USAGE','Usage: client.mjs configure|reconfigure|sync|doctor|export --url http(s)://host:port/v1 --key-file FILE [--codex-home DIR] [--provider ID] [--output FILE] [--auth-file FILE]');
-  const allowed=new Set(['url','key-file','codex-home','provider','output','auth-file']),opts={};
+  if(!commands.includes(command))fail('USAGE','Usage: client.mjs configure|reconfigure|sync|doctor|export --url http(s)://host:port/v1 --key-file FILE [--codex-home DIR] [--provider ID] [--bridge-url http://127.0.0.1:PORT/v1] [--output FILE] [--auth-file FILE]');
+  const allowed=new Set(['url','key-file','codex-home','provider','bridge-url','output','auth-file']),opts={};
   for(let i=0;i<args.length;i+=2) {
     const name=args[i]?.slice(2);
     if(!args[i]?.startsWith('--')||!allowed.has(name)||!args[i+1]||args[i+1].startsWith('--')||name in opts)fail('USAGE','Expected supported --name value options, with no duplicates.');
@@ -199,7 +236,7 @@ export async function runClient(argv,{fetchFn=fetch}={}) {
 }
 async function execute(argv,fetchFn) {
   const parsed=parseArgs(argv);
-  if(parsed.help)return {ok:true,commands,options:['--url','--key-file','--codex-home','--provider','--output','--auth-file'],sync:'Catalog and ETag metadata only; unchanged catalog and metadata produce no writes or backups.',reconfigure:'Updates one existing provider (selected provider by default) and HTTP MCP; does not switch another selected provider.'};
+  if(parsed.help)return {ok:true,commands,options:['--url','--key-file','--codex-home','--provider','--bridge-url','--output','--auth-file'],sync:'Catalog and ETag metadata only; unchanged catalog and metadata produce no writes or backups.',reconfigure:'Updates one existing provider (selected provider by default) and HTTP MCP; does not switch another selected provider.',openai:'Use configure --provider openai --bridge-url http://127.0.0.1:PORT/v1 after starting the native bridge. --url remains the authenticated remote gateway for catalog and MCP.'};
   const {command,opts}=parsed,base=apiBase(opts.url||'http://127.0.0.1:18787/v1');
   let key;
   try {key=fs.readFileSync(opts['key-file'],'utf8').trim();}catch{fail('KEY_FILE_UNREADABLE','Cannot read the gateway key file.');}
@@ -208,7 +245,21 @@ async function execute(argv,fetchFn) {
   const cfgFile=path.join(home,'config.toml'),catalogFile=path.join(home,'opencodex-catalog.json'),cacheFile=path.join(home,'models_cache.json'),metaFile=path.join(home,'caveman-catalog-sync.json');
   const cfgBefore=read(cfgFile),catalogBefore=read(catalogFile),cacheBefore=read(cacheFile),metaBefore=read(metaFile);
   const config=command==='export'?{}:parseConfig(cfgBefore?.toString('utf8')??''),local=localCatalog(catalogFile),metadata=jsonRead(metaFile);
-  const report=connectionReport(config,base,key,opts.provider);
+  // Re-running the documented setup must not undo a native Remote migration.
+  // Fresh installs without a bridge still retain the legacy explicit-header mode.
+  const preserveNative=command==='configure'&&effectiveConfig(config).provider==='openai'&&Boolean(config.openai_base_url);
+  const requestedProvider=opts.provider??(command==='configure'&&(opts['bridge-url']||preserveNative)?'openai':undefined);
+  const provider=requestedProvider??(command==='configure'?'caveman_stack':effectiveConfig(config).provider);
+  let bridgeUrl;
+  if(opts['bridge-url']) {
+    if(provider!=='openai')fail('BRIDGE_PROVIDER_MISMATCH','--bridge-url requires the built-in openai provider.');
+    bridgeUrl=bridgeBase(opts['bridge-url']);
+  } else if(provider==='openai'&&config.openai_base_url) {
+    try {bridgeUrl=bridgeBase(config.openai_base_url);}catch(error) {if(command==='configure'||command==='reconfigure')throw error;}
+  }
+  if((command==='configure'||command==='reconfigure')&&provider==='openai'&&!bridgeUrl)
+    fail('BRIDGE_URL_MISSING','--bridge-url is required to configure the built-in openai provider. Start the native bridge before changing the client.');
+  const report=connectionReport(config,base,key,requestedProvider,bridgeUrl);
   let auth;
   if(opts['auth-file']) {auth=jsonRead(opts['auth-file']);if(!auth)fail('AUTH_FILE_INVALID','The supplied auth file is unreadable or invalid.');}
   if(command==='doctor') {
@@ -216,16 +267,23 @@ async function execute(argv,fetchFn) {
     try {const result=await catalogRequest(base,key,undefined,local,metadata,fetchFn,false);remote={ok:true,models:result.catalog.models.length,notModified:result.notModified};}
     catch(error){remote={ok:false,error:error instanceof ClientError?error.code:'CATALOG_UNAVAILABLE'};}
     const mcp=await inspectMcp(mcpUrl(base),key,fetchFn),authState=authMetadata(opts['auth-file']||path.join(home,'auth.json'));
+    const bridge=report.provider==='openai'?await inspectBridge(bridgeUrl,base,fetchFn):undefined;
     const catalogReference=effectiveConfig(config).catalog;
     const refMatches=typeof catalogReference==='string'&&path.resolve(home,catalogReference)===catalogFile;
     const warnings=[...report.warnings];
     if(!local)warnings.push('local_catalog_invalid_or_missing');
     if(!refMatches)warnings.push('catalog_reference_mismatch');
     if(!authState.usable)warnings.push(authState.status);
-    return {ok:warnings.length===0&&remote.ok&&mcp.ok,command,provider:report.provider,selectedProvider:report.selectedProvider,profile:report.profile,warnings,catalog:{localValid:!!local,referenceMatches:refMatches,...remote},auth:authState,mcp,restartNotice:'Existing Codex processes or resumed chats may retain old provider settings. This command does not restart them.'};
+    return {ok:warnings.length===0&&remote.ok&&mcp.ok&&(!bridge||bridge.ok),command,provider:report.provider,selectedProvider:report.selectedProvider,profile:report.profile,warnings,catalog:{localValid:!!local,referenceMatches:refMatches,...remote},auth:authState,mcp,bridge,restartNotice:'Existing Codex processes or resumed chats may retain old provider settings. This command does not restart them.'};
   }
   let configured=null;
-  if(command==='configure'||command==='reconfigure')configured=configuredText(cfgBefore?.toString('utf8')??'',config,command,base,key,catalogFile,opts.provider);
+  if(command==='configure'||command==='reconfigure') {
+    configured=configuredText(cfgBefore?.toString('utf8')??'',config,command,base,key,catalogFile,requestedProvider,bridgeUrl);
+    if(configured.provider==='openai') {
+      const bridge=await inspectBridge(bridgeUrl,base,fetchFn);
+      if(!bridge.ok)fail(bridge.error,'The native OpenAI bridge is not ready or targets another gateway. Start the matching bridge before changing the client. Existing files were kept.');
+    }
+  }
   const fetched=await catalogRequest(base,key,auth,local,metadata,fetchFn,command==='export');
   const data=normalized(fetched.catalog),catalogChanged=!local||normalized(local)!==data;
   if(command==='export') {
@@ -238,7 +296,8 @@ async function execute(argv,fetchFn) {
   if(configured) {
     const settingsFile=path.join(home,'caveman-client.json');
     planned.push({file:settingsFile,before:read(settingsFile),after:JSON.stringify({version:1,
-      url:base,keyFile:path.resolve(opts['key-file']),codexHome:home,node:process.execPath},null,2)+'\n'});
+      url:base,keyFile:path.resolve(opts['key-file']),codexHome:home,node:process.execPath,
+      ...(configured.provider==='openai'?{provider:'openai',bridgeUrl}:{} )},null,2)+'\n'});
   }
   if(catalogChanged) {
     planned.push({file:catalogFile,before:catalogBefore,after:data},
@@ -250,8 +309,8 @@ async function execute(argv,fetchFn) {
   }
   // Backward-compatible first sync installs only the local catalog reference.
   // It never changes provider endpoints, gateway headers, MCP or credentials.
-  const nextConfig=configured?.text??configuredText(cfgBefore?.toString('utf8')??'',config,'sync',base,key,catalogFile,opts.provider).text;
+  const nextConfig=configured?.text??configuredText(cfgBefore?.toString('utf8')??'',config,'sync',base,key,catalogFile,requestedProvider,bridgeUrl).text;
   planned.push({file:cfgFile,before:cfgBefore,after:nextConfig});
-  const backup=commitFiles(home,planned),afterReport=connectionReport(parseConfig(nextConfig),base,key,configured?.provider??opts.provider);
+  const backup=commitFiles(home,planned),afterReport=connectionReport(parseConfig(nextConfig),base,key,configured?.provider??requestedProvider,bridgeUrl);
   return {ok:true,command,changed:backup!==null,catalogChanged,catalog:catalogFile,provider:configured?.provider??report.provider,selectedProvider:afterReport.selectedProvider,mcp:command==='sync'?undefined:mcpUrl(base),backup,warnings:afterReport.warnings,restartCodex:catalogChanged||nextConfig!==(cfgBefore?.toString('utf8')??'')};
 }

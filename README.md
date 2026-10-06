@@ -82,6 +82,12 @@ ADMIN_PORT=20100
 
 ## 2. 클라이언트 연결과 모델 목록
 
+**Android Remote를 함께 쓰는 개인 사용자는 아래의 기본 `openai` provider + 로컬 브리지
+설치 절차를 권장합니다.** 일부 앱 버전의 기본 세션 목록은 provider별로 필터링되어 사용자 정의
+provider로 생성한 대화가 누락될 수 있습니다. 아래 일반 연결 예시는 브리지 없이
+`caveman_stack` provider를 사용하는 방식입니다. 이미 기본 `openai` 브리지가 설정된 경우
+`configure`를 다시 실행해도 해당 연결을 유지하고, 브리지가 정지했으면 설정 변경을 거부합니다.
+
 서버의 `secrets/gateway-key` 파일을 본인의 Windows/WSL 클라이언트에 보관합니다.
 **관리자 키·사용자의 auth.json·CCR DB는 복사하지 않습니다.** 각 Codex 클라이언트에서 로그인합니다.
 
@@ -167,6 +173,74 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-shortc
 수동 설정·로그인·카탈로그·키는 유지합니다. 기본 설치·업데이트는 예약을 등록하지 않습니다.
 명시적으로 자동 갱신을 원하는 사용자를 위해 기존 `schedule.mjs install`은 선택 기능으로 유지합니다.
 자세한 절차는 [운영 가이드](docs/OPERATIONS.md#클라이언트-카탈로그-동기화)를 참고하세요.
+
+### Windows에서 기본 `openai` provider 사용
+
+Codex Remote에서 기존 세션과 새 세션의 provider ID를 `openai`로 맞추려면 기본 provider와
+로컬 브리지를 함께 사용합니다. 기본 `openai` provider는 사용자 정의 게이트웨이 헤더를
+설정할 수 없으므로 브리지가 `127.0.0.1`에서 요청을 받아 게이트웨이 키를 추가합니다.
+Codex 로그인 인증과 계정 헤더는 그대로 서버로 전달하며, 서버의 기존 키 인증도 유지합니다.
+
+```powershell
+# 로그인 시 자동 시작하는 로컬 브리지를 설치하고 즉시 상태 확인
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-native-bridge.ps1 `
+  -UpstreamUrl http://192.168.50.61:18787/v1 `
+  -KeyFile C:\Users\me\caveman-private\gateway-key
+
+# 기본 provider를 선택하고 로컬 브리지로 모델 요청을 전달
+node .\scripts\client.mjs configure --provider openai `
+  --url http://192.168.50.61:18787/v1 `
+  --key-file C:\Users\me\caveman-private\gateway-key `
+  --bridge-url http://127.0.0.1:18788/v1
+```
+
+설치기는 현재 사용자에게 `Caveman Native OpenAI Bridge` 로그인 예약을 등록합니다.
+이 예약은 콘솔 창 없이 브리지를 계속 실행하고 비정상 종료 시 재시도합니다.
+모델 목록 동기화 주기는 등록하지 않습니다. `-CodexHome`, `-Port`, `-NodePath`로 설치 위치와
+실행 경로를 지정할 수 있습니다. 저장소와 Node 실행 파일은 설치 후에도 해당 위치에 있어야 합니다.
+변경 전 설정과 기존 예약은 `caveman-stack/native-bridge-backups/`에 백업됩니다.
+같은 이름의 다른 예약이나 소유권을 확인할 수 없는 포트 사용 프로세스는 중지하지 않습니다.
+
+`openai_base_url`은 로컬 브리지를 가리키고, 복구 MCP와 수동 카탈로그 동기화는 계속 원격 서버를
+사용합니다. `model_providers.openai` 테이블은 만들지 않습니다. 설정 적용 후 Codex를 재시작하면
+새 세션은 `openai` provider로 생성됩니다. **기존 세션의 provider 기록은 이 명령으로 바뀌지 않습니다.**
+기존 세션을 전환하려면 Codex를 종료한 상태에서 세션 DB와 대화 파일을 함께 백업하고 별도로
+마이그레이션해야 합니다. 파일의 byte offset을 참조하는 기록도 있어 JSONL 전체를 다시 저장하면 안 됩니다.
+
+### Linux·WSL에서 기본 `openai` provider 사용
+
+Linux에서는 같은 브리지를 systemd 서비스로 설치합니다. 일반 사용자와 WSL은 `--user`,
+root가 운영하는 서버는 `--system`을 사용합니다. systemd와 Node.js 22.13 이상이 필요합니다.
+
+```bash
+# WSL 사용자 예시: Windows의 18788과 구분하여 18789 사용
+node scripts/install-native-bridge-linux.mjs --user \
+  --upstream-url http://192.168.50.61:18787/v1 \
+  --key-file "$HOME/.codex/caveman-stack/gateway-key" --port 18789
+node scripts/client.mjs configure --provider openai \
+  --url http://192.168.50.61:18787/v1 \
+  --key-file "$HOME/.codex/caveman-stack/gateway-key" \
+  --bridge-url http://127.0.0.1:18789/v1
+
+# 서버 root 예시: 실제 게이트웨이가 바인딩된 주소 사용
+node scripts/install-native-bridge-linux.mjs --system \
+  --codex-home /root/.codex --upstream-url http://192.168.50.61:18787/v1 \
+  --key-file /root/.codex/caveman-stack/gateway-key
+```
+
+서비스 이름은 `caveman-native-bridge.service`입니다. `--node-path`로 Node 실행 파일을 지정할 수
+있으며 기본값은 설치기를 실행한 Node입니다. 브리지 코드는 `<CODEX_HOME>/caveman-stack/`에
+복사하므로 서비스 기동에 Windows 드라이브나 원본 저장소가 필요하지 않습니다.
+키 내용은 서비스 파일에 넣지 않습니다. 설치기는 상태·프로세스 ID와 실제 카탈로그 접근을
+확인하고, 실패하면 이전 파일과 서비스 실행 상태를 복구합니다. 변경 전 파일은 같은 디렉터리의
+`native-bridge-backups/`에 저장합니다. 기존 서비스나 런타임 코드가 외부에서 수정된 경우 교체를 거부합니다.
+
+사용자 서비스는 사용자 systemd 관리자가 시작될 때 기동합니다. 로그인 전에도 필요하면 관리자가
+`loginctl enable-linger <사용자>`를 한 번 설정합니다. 설치기는 linger 설정이나 카탈로그 타이머를
+변경하지 않습니다. WSL은 배포판 자체가 실행 중이어야 하며 Windows 종료 후 WSL까지 자동 기동하는
+설정은 별도입니다. 상태는 `systemctl --user status caveman-native-bridge.service`로 확인합니다.
+시스템 서비스는 `--user`를 빼고 확인합니다. 설치 이후 `configure --provider openai`를 실행하고
+Codex를 재시작해야 새 provider 설정이 적용됩니다.
 
 ## 3. 설정 위치
 

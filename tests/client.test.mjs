@@ -8,6 +8,7 @@ import {once} from 'node:events';
 import {spawn} from 'node:child_process';
 import {runClient} from '../scripts/client-lib.mjs';
 import {parseConfig,patchConfig,REMOVE} from '../scripts/client-config.mjs';
+import {createNativeBridge} from '../src/native-bridge.mjs';
 
 const oldKey='old-fixture-credential-'.repeat(3),newKey='new-fixture-credential-'.repeat(3);
 const catalog={models:[{slug:'fixture',display_name:'Fixture',visibility:'list'}]};
@@ -20,6 +21,10 @@ function fixture(t,config='') {
   const fetchFn=async (url,opts)=>{
     state.requests.push({url:String(url),headers:{...opts.headers}});
     if(state.networkError)throw new Error(oldKey+' must not be printed');
+    if(String(url).endsWith('/healthz')) {
+      if(state.bridgeError)throw new Error(oldKey+' must not be printed');
+      return Response.json(state.bridgeHealth??{service:'caveman-native-bridge',status:'ok',ok:true,upstream:'http://127.0.0.1:18787/v1'});
+    }
     if(state.force304>0){state.force304--;return new Response(null,{status:304,headers:{etag:state.etag}});}
     if(state.status!==200)return new Response(oldKey,{status:state.status});
     if(opts.headers['if-none-match']===state.etag)return new Response(null,{status:304,headers:{etag:state.etag}});
@@ -45,6 +50,70 @@ test('configure installs one provider and HTTP recovery MCP, disables request co
   assert.deepEqual(config.features,{example:true,enable_request_compression:false});
   assert(fs.readFileSync(path.join(f.home,'config.toml'),'utf8').includes('# retain this comment'));
   assert.equal(fs.existsSync(path.join(f.home,'auth.json')),false);
+});
+
+test('built-in openai configuration uses healthy local bridge while catalog, MCP and sync metadata keep the authenticated remote gateway',async t=>{
+  const f=fixture(t,'# keep my settings\nmodel_provider = "caveman_lan"\n[model_providers.caveman_lan]\nname = "Legacy"\nbase_url = "http://old/v1"\n');
+  const legacy=f.configValue().model_providers.caveman_lan;
+  const result=await f.run('configure','--provider','openai','--bridge-url','http://127.0.0.1:18788/v1'),config=f.configValue();
+  assert.equal(result.ok,true);assert.equal(result.provider,'openai');assert.deepEqual(result.warnings,[]);
+  assert.equal(config.model_provider,'openai');assert.equal(config.openai_base_url,'http://127.0.0.1:18788/v1');
+  assert.equal(config.model_providers.openai,undefined);assert.deepEqual(config.model_providers.caveman_lan,legacy);
+  assert.equal(config.features.enable_request_compression,false);
+  assert.equal(config.mcp_servers.caveman.url,'http://127.0.0.1:18787/mcp');
+  assert.equal(config.mcp_servers.caveman.http_headers['x-caveman-gateway-key'],oldKey);
+  const settings=JSON.parse(fs.readFileSync(path.join(f.home,'caveman-client.json')));
+  assert.equal(settings.provider,'openai');assert.equal(settings.bridgeUrl,'http://127.0.0.1:18788/v1');
+  assert.equal(settings.url,'http://127.0.0.1:18787/v1');assert.equal(settings.keyFile,path.join(f.home,'key'));
+  const health=f.state.requests.find(r=>r.url.endsWith('/healthz'));
+  assert.deepEqual(health.headers,{});assert.equal(f.state.requests.at(-1).headers['x-caveman-gateway-key'],oldKey);
+  const before=f.snapshot(),sync=await f.run('sync');
+  assert.equal(sync.changed,false);assert.deepEqual(sync.warnings,[]);assert.deepEqual(f.snapshot(),before);
+});
+
+test('repeated configure preserves an existing native bridge and fails closed if it stops',async t=>{
+  const f=fixture(t);
+  await f.run('configure','--provider','openai','--bridge-url','http://127.0.0.1:18788/v1');
+  const before=f.snapshot();
+  const repeated=await f.run('configure');
+  assert.equal(repeated.provider,'openai');
+  assert.equal(repeated.changed,false);
+  assert.deepEqual(f.snapshot(),before);
+  f.state.bridgeError=true;
+  await assert.rejects(f.run('configure'),{code:'BRIDGE_UNREACHABLE'});
+  assert.deepEqual(f.snapshot(),before);
+  // An explicit provider selection remains available for intentional changes.
+  assert.equal((await f.run('configure','--provider','caveman_stack')).provider,'caveman_stack');
+});
+
+test('explicit bridge selects builtin openai in root and active profile and removes reserved table without removing aliases',async t=>{
+  const f=fixture(t,'profile = "work"\nmodel_provider = "root"\nmodel_providers = { openai = { base_url = "http://old/v1", http_headers = { Authorization = "legacy-secret" } }, old = { name = "keep" } }\n[profiles.work]\nmodel_provider = "caveman_lan"\nmodel = "keep-model"\n');
+  const result=await f.run('configure','--bridge-url','http://127.0.0.1:18788/v1'),config=f.configValue();
+  assert.equal(result.selectedProvider,'openai');assert.equal(config.model_provider,'openai');
+  assert.equal(config.profiles.work.model_provider,'openai');assert.equal(config.profiles.work.model,'keep-model');
+  assert.equal(config.model_providers.openai,undefined);assert.deepEqual(config.model_providers.old,{name:'keep'});
+});
+
+test('reconfigure built-in openai requires no custom provider table and keeps the current selection',async t=>{
+  const f=fixture(t,'model_provider = "other"\nopenai_base_url = "http://127.0.0.1:18788/v1"\n[model_providers.other]\nname = "keep"\n');
+  const result=await f.run('reconfigure','--provider','openai'),config=f.configValue();
+  assert.equal(config.model_provider,'other');assert.equal(config.model_providers.openai,undefined);
+  assert.deepEqual(config.model_providers.other,{name:'keep'});
+  assert(result.warnings.includes('updated_provider_is_not_selected'));
+});
+
+test('built-in configuration refuses missing, remote, unavailable and incorrectly routed bridges without changing files',async t=>{
+  const f=fixture(t,'model_provider = "caveman_lan"\n'),before=f.snapshot();
+  await assert.rejects(f.run('configure','--provider','openai'),{code:'BRIDGE_URL_MISSING'});
+  await assert.rejects(f.run('configure','--provider','openai','--bridge-url','http://remote.example/v1'),{code:'INVALID_BRIDGE_URL'});
+  await assert.rejects(f.run('configure','--provider','caveman_lan','--bridge-url','http://127.0.0.1:18788/v1'),{code:'BRIDGE_PROVIDER_MISMATCH'});
+  f.state.bridgeError=true;
+  await assert.rejects(f.run('configure','--provider','openai','--bridge-url','http://127.0.0.1:18788/v1'),{code:'BRIDGE_UNREACHABLE'});
+  f.state.bridgeError=false;f.state.bridgeHealth={service:'caveman-native-bridge',status:'ok',ok:true,upstream:'http://wrong:18787/v1'};
+  await assert.rejects(f.run('configure','--provider','openai','--bridge-url','http://127.0.0.1:18788/v1'),{code:'BRIDGE_UPSTREAM_MISMATCH'});
+  f.state.bridgeHealth={ok:true};
+  await assert.rejects(f.run('configure','--provider','openai','--bridge-url','http://127.0.0.1:18788/v1'),{code:'BRIDGE_HEALTH_INVALID'});
+  assert.deepEqual(f.snapshot(),before);
 });
 
 test('reconfigure rotates inline headers in the selected legacy provider and migrates SSH MCP',async t=>{
@@ -191,6 +260,41 @@ test('doctor initializes HTTP MCP and lists recovery tools without changing loca
   assert.equal(conflict.ok,false);assert(conflict.warnings.includes('provider_gateway_env_header_conflict'));
   assert(conflict.warnings.includes('mcp_gateway_env_header_conflict'));
   assert.deepEqual(f.snapshot(),conflictBefore);assert(!JSON.stringify(conflict).includes('STALE_'));
+});
+
+test('openai doctor checks the actual bridge gateway authentication separately from direct catalog and MCP',async t=>{
+  const f=fixture(t),requests=[];let requiredKey=oldKey;
+  const server=http.createServer(async(q,s)=>{
+    requests.push({url:q.url,headers:q.headers});
+    if(q.headers['x-caveman-gateway-key']!==requiredKey){s.writeHead(401).end();return;}
+    if(q.url==='/v1/catalog'){s.writeHead(200,{'content-type':'application/json'}).end(JSON.stringify(catalog));return;}
+    if(q.url!=='/mcp'||q.method!=='POST'){s.writeHead(405).end();return;}
+    const chunks=[];for await(const chunk of q)chunks.push(chunk);const message=JSON.parse(Buffer.concat(chunks));
+    if(message.id===undefined){s.writeHead(202).end();return;}
+    const result=message.method==='initialize'?{protocolVersion:'2025-03-26',capabilities:{tools:{}},serverInfo:{name:'fixture-mcp',version:'1.0.0'}}:{tools:[{name:'caveman_retrieve',description:'Recovery',inputSchema:{type:'object'}}]};
+    s.writeHead(200,{'content-type':'application/json'}).end(JSON.stringify({jsonrpc:'2.0',id:message.id,result}));
+  });
+  server.listen(0,'127.0.0.1');await once(server,'listening');
+  t.after(()=>{server.closeAllConnections();server.close();});
+  const base='http://127.0.0.1:'+server.address().port+'/v1';
+  const bridge=createNativeBridge({upstreamUrl:base,key:oldKey});
+  bridge.listen(0,'127.0.0.1');await once(bridge,'listening');
+  t.after(()=>{bridge.closeAllConnections();bridge.close();});
+  const bridgeUrl='http://127.0.0.1:'+bridge.address().port+'/v1';
+  const args=['--url',base,'--key-file',path.join(f.home,'key'),'--codex-home',f.home,'--provider','openai','--bridge-url',bridgeUrl];
+  await runClient(['configure',...args]);
+  fs.writeFileSync(path.join(f.home,'auth.json'),JSON.stringify({OPENAI_API_KEY:'fixture-user-auth-do-not-forward'}));
+  const before=f.snapshot(),result=await runClient(['doctor',...args]);
+  assert.equal(result.ok,true,JSON.stringify(result));assert.equal(result.bridge.catalogAvailable,true);
+  assert.equal(result.bridge.upstreamMatches,true);assert.equal(result.bridge.models,1);
+  assert.equal(result.catalog.ok,true);assert.equal(result.mcp.ok,true);assert.deepEqual(f.snapshot(),before);
+  assert(requests.every(r=>r.headers.authorization===undefined));
+  requiredKey=newKey;fs.writeFileSync(path.join(f.home,'key'),newKey);
+  const staleBefore=f.snapshot(),stale=await runClient(['doctor',...args]);
+  assert.equal(stale.ok,false);assert.equal(stale.catalog.ok,true);assert.equal(stale.mcp.ok,true);
+  assert.equal(stale.bridge.error,'BRIDGE_CATALOG_HTTP_401');assert.deepEqual(f.snapshot(),staleBefore);
+  await assert.rejects(runClient(['configure',...args]),{code:'BRIDGE_CATALOG_HTTP_401'});
+  assert.deepEqual(f.snapshot(),staleBefore);assert(!JSON.stringify(stale).includes(oldKey));assert(!JSON.stringify(stale).includes(newKey));
 });
 
 test('CLI validation output does not reveal gateway keys or raw invalid config',async t=>{
