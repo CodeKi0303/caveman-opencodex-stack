@@ -26,6 +26,17 @@ async function fixture(t,limit=1024){
 test('network allowlist IPv4/IPv6 and mapped addresses',()=>{
   const allow=addressPolicy('10.20.0.0/16,::1/128');assert(allow('::ffff:10.20.1.9'));assert(allow('::1'));assert(!allow('10.21.1.9'));
 });
+
+test('authenticated compression selection routes per request and never forwards the control header',async t=>{
+  const f=await fixture(t),headers={'x-caveman-gateway-key':key,'content-type':'application/json'};
+  assert.equal((await fetch(f.url+'/v1/stack-info')).status,401);
+  assert.equal((await fetch(f.url+'/v1/stack-info',{headers}).then(r=>r.json())).capabilities.compressionSwitch,true);
+  for(const [mode,port,url] of [['off',10101,'/v1/responses'],['on',8787,'/compat/opencodex/v1/responses']]){
+    const r=await fetch(f.url+'/v1/responses',{method:'POST',headers:{...headers,'x-caveman-compression':mode},body:'{}'});await r.text();
+    assert.equal(r.status,200);assert.equal(f.ports.at(-1),port);assert.equal(f.seen.at(-1).url,url);assert.equal(f.seen.at(-1).headers['x-caveman-compression'],undefined);
+  }
+  assert.equal((await fetch(f.url+'/v1/responses',{method:'POST',headers:{...headers,'x-caveman-compression':'invalid'},body:'{}'})).status,400);
+});
 test('auth guards models, catalog and responses; health remains readable',async t=>{
   const f=await fixture(t);
   for(const endpoint of ['/v1/models','/v1/catalog','/v1/responses'])assert.equal((await fetch(f.url+endpoint)).status,401);

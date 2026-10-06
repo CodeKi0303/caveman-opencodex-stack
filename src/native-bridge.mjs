@@ -8,7 +8,7 @@ import {Transform} from 'node:stream';
 const DEFAULT_LIMIT = 268435456;
 const hopHeaders = ['connection','keep-alive','proxy-authenticate','proxy-authorization',
   'te','trailer','transfer-encoding','upgrade','host'];
-const requestDenied = new Set([...hopHeaders, 'x-caveman-gateway-key', 'cookie',
+const requestDenied = new Set([...hopHeaders, 'x-caveman-gateway-key', 'x-caveman-compression', 'cookie',
   'forwarded','x-forwarded-for','x-forwarded-host','x-forwarded-proto']);
 const responseDenied = new Set([...hopHeaders, 'x-caveman-gateway-key', 'authorization',
   'chatgpt-account-id','x-api-key','cookie','set-cookie','location']);
@@ -64,15 +64,14 @@ function validLocalRequest(req) {
  * The provider supplies OAuth/account headers; this adapter adds the LAN key.
  * The destination is fixed at startup and never derived from incoming headers.
  */
-export function createNativeBridge({upstreamUrl, key, maxRequestBytes = DEFAULT_LIMIT, timeoutMs = 300000} = {}) {
-  const destination = canonicalUpstream(upstreamUrl);
+export function createNativeBridge({upstreamUrl, key, maxRequestBytes = DEFAULT_LIMIT, timeoutMs = 300000, getSettings} = {}) {
+  canonicalUpstream(upstreamUrl);
   if (typeof key !== 'string' || key.length < 32 || /[\r\n]/.test(key))
     throw Error('Bridge gateway key must be at least 32 characters without line breaks');
   if (!Number.isSafeInteger(maxRequestBytes) || maxRequestBytes < 1 || maxRequestBytes > DEFAULT_LIMIT)
     throw Error('Invalid bridge request limit');
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 3600000)
     throw Error('Invalid bridge upstream timeout');
-  const request = destination.protocol === 'https:' ? https.request : http.request;
   const sendError = (res, status, message) => {
     if (res.destroyed || res.writableEnded) return;
     if (res.headersSent) { res.destroy(); return; }
@@ -82,10 +81,20 @@ export function createNativeBridge({upstreamUrl, key, maxRequestBytes = DEFAULT_
   };
   const server = http.createServer((req, res) => {
     if (!validLocalRequest(req)) return sendError(res,403,'Only same-origin loopback clients are allowed');
+    let destination, activeKey, compression;
+    try {
+      const settings = getSettings?.() ?? {upstreamUrl,key};
+      destination = canonicalUpstream(settings.upstreamUrl);
+      activeKey = settings.key;
+      if (typeof activeKey !== 'string' || activeKey.length < 32 || /[\r\n]/.test(activeKey)) throw Error();
+      compression = settings.compression !== false;
+    } catch { return sendError(res,503,'Bridge settings are unavailable'); }
+    const request = destination.protocol === 'https:' ? https.request : http.request;
     if (req.url === '/healthz' && req.method === 'GET') {
       res.writeHead(200, {'content-type':'application/json','cache-control':'no-store'})
         .end(JSON.stringify({service:'caveman-native-bridge',status:'ok',ok:true,
-          upstream:destination.href,upstreamUrl:destination.href,pid:process.pid,max_request_bytes:maxRequestBytes}));
+          upstream:destination.href,upstreamUrl:destination.href,pid:process.pid,max_request_bytes:maxRequestBytes,
+          compression,controlVersion:1}));
       return;
     }
     const [pathname] = (req.url ?? '').split('?');
@@ -104,7 +113,8 @@ export function createNativeBridge({upstreamUrl, key, maxRequestBytes = DEFAULT_
     let responseStream;
     const upstream = request({protocol:destination.protocol, hostname:destination.hostname,
       port:destination.port || undefined, method:req.method, path:req.url,
-      headers:{...cleanHeaders(req.headers,requestDenied),'x-caveman-gateway-key':key}}, response => {
+      headers:{...cleanHeaders(req.headers,requestDenied),'x-caveman-gateway-key':activeKey,
+        'x-caveman-compression':compression?'on':'off'}}, response => {
       responseStream = response;
       if (rejected || res.destroyed || res.writableEnded) { response.destroy(); return; }
       const status = response.statusCode ?? 502;
@@ -167,7 +177,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       throw Error('Bridge keyFile must be an absolute path');
     if (!Number.isInteger(config.port) || config.port < 1024 || config.port > 65535)
       throw Error('Bridge port must be between 1024 and 65535');
-    const server = createNativeBridge({...config,key:readFileSync(config.keyFile,'utf8').trim()});
+    const getSettings = () => {
+      const current=JSON.parse(readFileSync(process.argv[3],'utf8'));
+      return {...current,key:readFileSync(current.keyFile,'utf8').trim()};
+    };
+    const server = createNativeBridge({...config,key:readFileSync(config.keyFile,'utf8').trim(),getSettings});
     server.on('error', () => { console.error('Native bridge could not listen on its loopback port'); process.exitCode = 1; });
     server.listen(config.port, '127.0.0.1', () => console.log(`Native bridge listening on 127.0.0.1:${config.port}`));
     const stop = () => {

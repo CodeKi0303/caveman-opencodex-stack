@@ -6,6 +6,19 @@ import {once} from 'node:events';
 import {createNativeBridge} from '../src/native-bridge.mjs';
 
 const key = 'bridge-fixture-'.repeat(4);
+test('bridge reloads destination policy per request and overrides caller compression preference',async t=>{
+  const seen=[];const backend=http.createServer((q,s)=>{seen.push(q.headers);q.resume();s.end('ok');});backend.listen(0,'127.0.0.1');await once(backend,'listening');
+  const upstreamUrl=`http://127.0.0.1:${backend.address().port}/v1`;let settings={upstreamUrl,key,compression:false};
+  const bridge=createNativeBridge({upstreamUrl,key,getSettings:()=>settings});bridge.listen(0,'127.0.0.1');await once(bridge,'listening');
+  t.after(()=>{bridge.closeAllConnections();bridge.close();backend.closeAllConnections();backend.close();});
+  const url=`http://127.0.0.1:${bridge.address().port}`;
+  await call(url+'/v1/responses',{method:'POST',body:'{}',headers:{'x-caveman-compression':'on'}});
+  assert.equal(seen[0]['x-caveman-compression'],'off');
+  settings={...settings,key:'changed-fixture-'.repeat(4),compression:true};
+  await call(url+'/v1/responses',{method:'POST',body:'{}'});
+  assert.equal(seen[1]['x-caveman-compression'],'on');assert.equal(seen[1]['x-caveman-gateway-key'],settings.key);
+  settings={...settings,upstreamUrl:'file:///etc/passwd'};assert.equal((await call(url+'/v1/responses',{method:'POST',body:'{}'})).status,503);
+});
 async function fixture(t, {handler, maxRequestBytes = 1024, timeoutMs = 1000} = {}) {
   const seen = [];
   const backend = http.createServer((req, res) => {
@@ -74,7 +87,7 @@ test('all gateway model, tool and catalog routes use the fixed upstream',async t
   assert(f.seen.every(row => row.headers['x-caveman-gateway-key'] === key));
   const health = await call(f.url+'/healthz');
   assert.deepEqual(JSON.parse(health.body),{service:'caveman-native-bridge',status:'ok',ok:true,
-    upstream:f.upstreamUrl,upstreamUrl:f.upstreamUrl,pid:process.pid,max_request_bytes:1024});
+    upstream:f.upstreamUrl,upstreamUrl:f.upstreamUrl,pid:process.pid,max_request_bytes:1024,compression:true,controlVersion:1});
   assert.equal(f.seen.length,8);
 });
 
