@@ -94,6 +94,15 @@ test('Linux installer refuses an occupied port or an altered unit before stoppin
   assert.equal(altered.calls.some(call => call.includes('stop')), false);
 });
 
+test('Linux bridge keeps manager-published configuration bytes for safe later rollback', async t => {
+  const f=await fixture(t);
+  await fs.mkdir(f.plan.bridgeHome,{recursive:true});
+  const original=JSON.stringify({port:f.plan.port,controlPort:18790,upstreamUrl:f.plan.upstreamUrl,keyFile:f.plan.keyFile,compression:false,management:{mode:'local',repo:'/example'},futureOption:true},null,4)+'\n';
+  await fs.writeFile(f.plan.configPath,original);
+  await installBridge(f.plan,f.dependencies);
+  assert.equal(await fs.readFile(f.plan.configPath,'utf8'),original);
+});
+
 test('Linux failed catalog check restores the previous config, unit and active service', async t => {
   const f = await fixture(t, {system: true});
   await installBridge(f.plan, f.dependencies);

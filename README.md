@@ -4,7 +4,7 @@ Linux에서 **Codex → 게이트웨이 → Caveman 압축 프록시 → OpenCod
 Caveman이 요청의 압축 가능한 입력(예: 긴 도구 결과)을 줄여 OpenCodex로 전달하고,
 OpenCodex는 설정된 제공자·모델 정책에 따라 해당 모델 API로 요청을 전달합니다.
 모든 입력이 압축되는 것은 아니며 압축 조건에 맞지 않는 내용은 유지합니다.
-호스트에는 **Podman 5+, slirp4netns, Python 3.11+, Git**이 필요합니다. 클라이언트 설정 도구는 Node.js 22.13+를 사용하며, 환경변수 기반 회사 프록시를 쓰는 클라이언트는 Node.js 24.14+를 권장합니다.
+호스트에는 **Podman 4.9.3+, slirp4netns, Python 3.11+, Git**이 필요합니다. 클라이언트 설정 도구는 Node.js 22.13+를 사용하며, 환경변수 기반 회사 프록시를 쓰는 클라이언트는 Node.js 24.14+를 권장합니다.
 Windows/WSL Codex는 HTTP(S)로 접속하므로 작업 파일과 도구 실행은 각 PC에 남습니다.
 개인 사용 기준으로 본인의 여러 클라이언트가 같은 게이트웨이와 압축 원문 DB를 공유합니다.
 
@@ -38,6 +38,38 @@ proxy/MCP 엔진은 **BSL-1.1**입니다. 해당 Additional Use Grant는 자체 
 [정확한 release 고지](THIRD_PARTY.md)를 함께 확인하세요.
 
 ## 1. 시작
+
+Linux·WSL에서는 **올인원 메뉴로 설치하고 관리**할 수 있습니다. 처음에 설치 형태와 접속 범위를
+선택하면 서버·브리지·웹 제어 페이지와 자동 시작 서비스를 차례로 구성합니다. 파일을 직접 편집하거나
+키·설정 경로를 명령마다 입력할 필요가 없습니다.
+
+아래 기능은 현재 `feature/all-in-one-linux` 브랜치 기준이며 아직 `main`에 병합되지 않았습니다.
+
+```bash
+git clone --branch feature/all-in-one-linux \
+  https://github.com/CodeKi0303/caveman-opencodex-stack.git caveman-podman
+cd caveman-podman
+./manage
+```
+
+- **이 Linux에 전체 서버 설치**: Podman 서버부터 Codex 연결·웹 제어까지 구성합니다.
+- **기존 서버에 클라이언트 연결**: 서버 주소와 게이트웨이 키를 한 번 입력하고 이 사용자의 Codex를 연결합니다.
+
+메뉴 **1 → 설치 방식 선택 → 표시되는 질문에 답하기**로 진행합니다. 새 전체 서버는 키를 자동으로 만들고
+연결하며, 기존 서버 연결의 키는 숨김 입력 또는 키 파일 선택으로 받습니다. 포트는 추천값을 사용할 수 있습니다.
+로그인과 연결 진단이 끝나면 **10번 `Codex 실행`**으로 바로 작업을 시작합니다. 저장소에 준비된 Codex CLI를
+사용하므로 전역 `codex` 명령을 따로 설치하거나 찾을 필요가 없습니다.
+
+설치 후에도 `./manage`에서 로그인, 연결 진단, 압축 ON/OFF, 모델 목록 동기화, 업데이트와 재시작을
+선택합니다. 웹 제어 페이지도 함께 제공하며 GUI 없는 원격 Linux는 다른 PC의 브라우저로 접속합니다.
+Node가 없으면 런타임 설치 동의를 요청하고, 서버 패키지가 부족하면 지원하는 패키지 관리자의
+설치 옵션을 안내합니다. 15분 카탈로그 예약은 만들지 않습니다.
+
+일반 Linux 사용자로 실행하면 그 사용자의 Codex와 rootless Podman을 사용합니다. root로 실행하면
+root의 설정·컨테이너를 사용하므로 기존 설치와 같은 계정으로 실행하세요. WSL은 Linux 홈에 clone하고
+WSL 터미널에서 실행합니다. [두 설치 시나리오와 운영 안내](docs/ALL-IN-ONE.md)를 참고하세요.
+
+### 개별 명령으로 설치
 
 일반 Linux 사용자로 실행하는 rootless Podman을 권장합니다. `sudo podman`과 `podman`의 저장소는 다릅니다.
 
@@ -236,8 +268,8 @@ node scripts/install-native-bridge-linux.mjs --system \
 `native-bridge-backups/`에 저장합니다. 기존 서비스나 런타임 코드가 외부에서 수정된 경우 교체를 거부합니다.
 
 사용자 서비스는 사용자 systemd 관리자가 시작될 때 기동합니다. 로그인 전에도 필요하면 관리자가
-`loginctl enable-linger <사용자>`를 한 번 설정합니다. 설치기는 linger 설정이나 카탈로그 타이머를
-변경하지 않습니다. WSL은 배포판 자체가 실행 중이어야 하며 Windows 종료 후 WSL까지 자동 기동하는
+`loginctl enable-linger <사용자>`를 한 번 설정합니다. 위 개별 브리지 설치기는 linger 설정이나 카탈로그 타이머를
+변경하지 않습니다. 올인원 `./manage`에서는 linger 활성화를 선택할 수 있습니다. WSL은 배포판 자체가 실행 중이어야 하며 Windows 종료 후 WSL까지 자동 기동하는
 설정은 별도입니다. 상태는 `systemctl --user status caveman-native-bridge.service`로 확인합니다.
 시스템 서비스는 `--user`를 빼고 확인합니다. 설치 이후 `configure --provider openai`를 실행하고
 Codex를 재시작해야 새 provider 설정이 적용됩니다.

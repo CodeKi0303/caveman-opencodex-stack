@@ -43,7 +43,10 @@ export function makePlan(opts, {home = os.homedir(), env = process.env, repo = p
 export function renderUnit(plan) {
   return `# Managed by ${owner}; local control panel\n[Unit]\nDescription=Caveman local control panel\nAfter=network.target\nStartLimitIntervalSec=0\n\n[Service]\nType=simple\n` +
     `ExecStart=:${systemdQuote(plan.nodePath)} ${systemdQuote(plan.entryPath)} --config ${systemdQuote(plan.configPath)}\n` +
-    'Restart=on-failure\nRestartSec=3\nTimeoutStopSec=15\nKillMode=control-group\nNoNewPrivileges=true\nUMask=0077\n\n[Install]\n' +
+    'Restart=on-failure\nRestartSec=3\nTimeoutStopSec=15\nKillMode=control-group\n' +
+    // Rootless Podman invokes setuid newuidmap/newgidmap; only trusted same-repo
+    // local management needs that capability. SSH client and root services keep it blocked.
+    `NoNewPrivileges=${plan.rootlessLocalManagement ? 'false' : 'true'}\nUMask=0077\n\n[Install]\n` +
     `WantedBy=${plan.system ? 'multi-user.target' : 'default.target'}\n`;
 }
 
@@ -117,6 +120,13 @@ export async function installControlPanel(plan, dependencies = {}) {
   const port = config?.controlPort ?? 18786;
   if (!config || !Number.isInteger(config.port) || config.port < 1024 || config.port > 65535 ||
       !Number.isInteger(port) || port < 1024 || port > 65535 || port === config.port) throw Error('Invalid control or bridge port.');
+  let rootlessLocalManagement = false;
+  if (config.management?.mode === 'local') {
+    const repo = await fs.realpath(path.resolve(path.dirname(plan.entryPath), '..'));
+    if (typeof config.management.repo !== 'string' || !path.isAbsolute(config.management.repo) ||
+        await fs.realpath(config.management.repo) !== repo) throw Error('Local management must target this control panel repository.');
+    rootlessLocalManagement = !plan.system && (dependencies.uid ?? process.getuid?.()) !== 0;
+  }
   const nodeVersion = /^v(\d+)\.(\d+)\.(\d+)$/.exec(await command(plan.nodePath, ['--version']));
   if (!nodeVersion || Number(nodeVersion[1]) < 22 || (Number(nodeVersion[1]) === 22 && Number(nodeVersion[2]) < 13)) throw Error('Node.js 22.13 or later is required.');
   if (!(await fs.stat(plan.entryPath)).isFile()) throw Error('The control panel entry must be a file.');
@@ -154,7 +164,7 @@ export async function installControlPanel(plan, dependencies = {}) {
     await fs.mkdir(backup, {recursive: true, mode: 0o700});
     for (const [file, bytes] of before) if (bytes) await fs.writeFile(path.join(backup, path.basename(file)), bytes, {mode: 0o600});
     await fs.writeFile(path.join(backup, 'service-state.json'), JSON.stringify(previousState, null, 2) + '\n', {mode: 0o600});
-    const unit = renderUnit(plan);
+    const unit = renderUnit({...plan, rootlessLocalManagement});
     let changed = false, enableAttempted = false, startAttempted = false;
     try {
       if (owned) await ctl('stop', unitName);

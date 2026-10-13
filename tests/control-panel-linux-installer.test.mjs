@@ -77,6 +77,23 @@ test('Linux panel install and owned restart preserve native bridge settings byte
   assert.ok(f.calls.some(call => call.includes('stop')));
 });
 
+test('only trusted same-repository rootless management permits Podman UID helpers', async t => {
+  for (const [system, uid, local, expected] of [[false, 1000, true, 'false'], [true, 0, true, 'true'], [false, 1000, false, 'true']]) {
+    const f = await fixture(t, {system});
+    if (local) {
+      const config = JSON.parse(f.config);
+      config.management = {mode: 'local', repo: path.resolve(path.dirname(f.plan.entryPath), '..')};
+      await fs.writeFile(f.plan.configPath, JSON.stringify(config));
+    }
+    await installControlPanel(f.plan, {...f.dependencies, uid});
+    assert.match(await fs.readFile(f.plan.unitPath, 'utf8'), new RegExp(`NoNewPrivileges=${expected}`));
+  }
+  const f = await fixture(t);
+  await fs.writeFile(f.plan.configPath, JSON.stringify({...JSON.parse(f.config), management: {mode: 'local', repo: f.plan.bridgeHome}}));
+  await assert.rejects(installControlPanel(f.plan, {...f.dependencies, uid: 1000}), /this control panel repository/);
+  assert.equal(f.calls.length, 0);
+});
+
 test('Linux panel refuses foreign, overridden and altered units or a foreign port before stopping', async t => {
   for (const condition of ['occupied', 'altered', 'override', 'wrongPid', 'foreign']) {
     const f = await fixture(t);
