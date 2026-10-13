@@ -43,10 +43,10 @@ Linux·WSL에서는 **올인원 메뉴로 설치하고 관리**할 수 있습니
 선택하면 서버·브리지·웹 제어 페이지와 자동 시작 서비스를 차례로 구성합니다. 파일을 직접 편집하거나
 키·설정 경로를 명령마다 입력할 필요가 없습니다.
 
-아래 기능은 현재 `feature/all-in-one-linux` 브랜치 기준이며 아직 `main`에 병합되지 않았습니다.
+기본 `main` 브랜치를 받아 다음과 같이 시작합니다.
 
 ```bash
-git clone --branch feature/all-in-one-linux \
+git clone \
   https://github.com/CodeKi0303/caveman-opencodex-stack.git caveman-podman
 cd caveman-podman
 ./manage

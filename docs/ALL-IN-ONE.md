@@ -4,7 +4,7 @@ Linux 터미널에서 `./manage`를 실행하고 메뉴를 선택합니다. 처�
 저장된 주소·키 파일·포트·Codex 홈을 사용합니다. GUI 없는 원격 Linux에서도 설치와 운영을 완료할 수 있으며
 기존 웹 제어 페이지도 함께 설치됩니다.
 
-이 문서는 아직 `main`에 병합되지 않은 `feature/all-in-one-linux` 브랜치 기준입니다.
+이 문서는 기본 `main` 브랜치의 올인원 설치 기능을 기준으로 합니다.
 
 ## 시작 명령
 
@@ -12,7 +12,7 @@ Linux 터미널에서 `./manage`를 실행하고 메뉴를 선택합니다. 처�
 WSL이라면 해당 배포판의 터미널을 엽니다.
 
 ```bash
-git clone --branch feature/all-in-one-linux \
+git clone \
   https://github.com/CodeKi0303/caveman-opencodex-stack.git caveman-podman
 cd caveman-podman
 ./manage
