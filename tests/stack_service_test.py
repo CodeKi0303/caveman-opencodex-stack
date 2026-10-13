@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import shutil
+import subprocess
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -240,6 +242,18 @@ class ServiceTests(unittest.TestCase):
         self.assertIn('\\"quoted\\"', unit)
         with self.assertRaises(RuntimeError):
             m.quote('/path\nExecStart=/bin/false')
+
+    @unittest.skipUnless(shutil.which('systemd-analyze'), 'systemd-analyze is unavailable')
+    def test_real_systemd_parser_accepts_working_directory_with_spaces_and_specifiers(self):
+        plan, _, _ = self.fixture()
+        repo = plan.repo.parent / 'checkout with spaces 50% $USER'
+        repo.mkdir()
+        (repo / 'stack').write_text('# fixture\n')
+        plan.repo = repo
+        plan.unit_path.parent.mkdir(parents=True)
+        plan.unit_path.write_bytes(m.render_unit(plan))
+        result = subprocess.run(['systemd-analyze', 'verify', '--man=no', str(plan.unit_path)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_scope_must_match_current_user(self):
         for uid, system in [(1000, True), (0, False)]:

@@ -33,6 +33,16 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def working_directory(value):
+    # Unlike ExecStart, WorkingDirectory is a single path setting: surrounding
+    # quotes become literal filename characters. Internal spaces are supported.
+    text = str(value)
+    quote(text)  # Validate control characters without applying argv quoting.
+    if text != text.strip() or '\\' in text:
+        raise RuntimeError('The service checkout path cannot contain backslashes or surrounding whitespace.')
+    return text.replace('%', '%%')
+
+
 @dataclass
 class Plan:
     repo: Path
@@ -77,7 +87,7 @@ def render_unit(plan):
     return (f'# Managed by {OWNER}; Podman stack\n[Unit]\n'
             'Description=Caveman OpenCodex Podman stack\nAfter=network-online.target\nWants=network-online.target\n\n'
             '[Service]\nType=oneshot\nRemainAfterExit=yes\n'
-            f'WorkingDirectory={quote(plan.repo)}\n'
+            f'WorkingDirectory={working_directory(plan.repo)}\n'
             f'ExecStart=:{quote(plan.python)} {quote(plan.repo / "stack")} up\n'
             f'ExecStop=:{quote(plan.python)} {quote(plan.repo / "stack")} down\n'
             'TimeoutStartSec=180\nTimeoutStopSec=90\nUMask=0077\n\n[Install]\n'
