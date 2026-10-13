@@ -44,6 +44,9 @@ process.exit(17);
     [IO.File]::WriteAllText($launcherPath, (New-Launcher $command), $utf8)
     & $cscriptPath //nologo $launcherPath
     if ($LASTEXITCODE -ne 17) { throw 'The launcher failed to preserve its child exit status.' }
+    # The nonzero child exit is intentional. Do not leak it into the CI shell's
+    # final LASTEXITCODE check after this regression test succeeds.
+    $global:LASTEXITCODE = 0
     $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
     if (-not $result.ok) { throw 'The launcher failed to preserve paths and arguments.' }
     Write-Output 'Installer parse, hidden Node launch, spaced paths, arguments, and exit status passed.'
