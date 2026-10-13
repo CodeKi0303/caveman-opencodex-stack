@@ -6,14 +6,17 @@ import {createManager,normalizeUrl,parseManagerArgs,safeError} from './manage-li
 
 const help=`Caveman + OpenCodex 관리 터미널
 
-  node scripts/manage.mjs [--codex-home DIR] [--user|--system]
-  node scripts/manage.mjs --status [--codex-home DIR]
+  node scripts/manage.mjs [--codex-home DIR] [--user|--system] [--headless|--with-web-ui]
+  node scripts/manage.mjs --status [--codex-home DIR] [--headless|--with-web-ui]
 
 메뉴에서 Pod 주소 / Gateway API 키 설정, 설치, Caveman ON/OFF,
 수동 카탈로그 동기화, 로컬·서버 재시작, 서버 Git/최신 버전 업데이트를 선택합니다.
 --status는 설정과 연결 상태만 읽으며 키 값을 출력하지 않습니다.
 Linux 기본값은 사용자 systemd 서비스이며 --system은 root가 실행해야 합니다.
 기존 Linux 설치는 서비스 범위를 자동으로 유지합니다.
+Linux/WSL은 기본 터미널 전용입니다. GUI나 브라우저 없이 모든 메뉴를 사용합니다.
+--with-web-ui를 지정하면 웹 제어 페이지도 설치합니다. Windows는 웹 포함이 기본값입니다.
+--headless는 모든 OS에서 웹 설치를 생략합니다. 이미 설치된 웹 서비스는 그대로 유지합니다.
 Gateway API 키는 모델 연결용이고 OpenCodex Admin Key와 별개입니다.
 키는 숨김 입력 또는 기존 SSH 키로 한 번 가져와 로컬에 저장합니다.
 주기적인 카탈로그 동기화 작업은 등록하지 않습니다.
@@ -47,7 +50,9 @@ export function createTerminalIO({input=process.stdin,output=process.stdout}={})
           if(char>=' '&&char<='~'){if(value.length>=4096){finish(Error('INVALID_GATEWAY_KEY'));return;}value+=char;output.write('*');}
         }
       };
-      output.write(question+': ');input.setRawMode(true);input.on('data',receive);input.once('error',failed);input.once('end',cancel);input.resume();
+      // Disable kernel echo before making the prompt visible. Fast terminal
+      // input (including pastes/PTY automation) must never race with raw mode.
+      input.setRawMode(true);input.on('data',receive);input.once('error',failed);input.once('end',cancel);input.resume();output.write(question+': ');
     });
   };
   const confirm=async(question,defaultYes=false)=>{
@@ -57,7 +62,7 @@ export function createTerminalIO({input=process.stdin,output=process.stdout}={})
 }
 
 const errors={
-  TTY_REQUIRED:'대화형 터미널에서 실행하세요. 자동 점검에는 --status를 사용할 수 있습니다.',
+  TTY_REQUIRED:'대화형 터미널이 필요합니다. SSH 로그인 후 ./Manage.sh를 실행하거나 원격 한 줄 실행에는 ssh -t를 사용하세요. 자동 점검에는 --status를 사용할 수 있습니다.',
   INVALID_URL:'Pod 주소는 http(s)://호스트:포트 또는 /v1 주소여야 합니다.',
   INVALID_GATEWAY_KEY:'Gateway API 키 형식이 올바르지 않습니다. 32~4096자의 공백 없는 키를 입력하세요.',
   GATEWAY_KEY_REJECTED:'서버가 Gateway API 키를 거부했습니다. Admin Key가 아닌 Gateway 키인지 확인하세요.',
@@ -119,24 +124,25 @@ async function setup(io,manager) {
   }
   const compression=await io.confirm('이 클라이언트에서 Caveman 압축을 사용할까요?',old?.compression!==false);
   const port=old?.port??Number(await io.ask('로컬 브릿지 포트',String(manager.defaults.port)));
-  const controlPort=old?(old.controlPort??18786):Number(await io.ask('로컬 제어 페이지 포트',String(manager.defaults.controlPort)));
+  const controlPort=old?(old.controlPort??18786):manager.webUiEnabled?Number(await io.ask('로컬 제어 페이지 포트',String(manager.defaults.controlPort))):manager.defaults.controlPort;
   io.write('서버 키와 모델 목록을 검증하고 설정을 저장합니다…');
   const result=await manager.saveConnection({upstreamUrl,key,management,importKey:source==='3',compression,port,controlPort});
   io.write(`연결 저장 완료 · 모델 ${result.models}개 · 키는 로컬 보호 파일에 저장했습니다.`);
   if(result.appliedToClient)io.write('실행 중인 브릿지에 적용했습니다. Codex를 다시 시작하면 MCP 연결 설정도 반영됩니다.');
-  if(await io.confirm(result.installRequired?'브릿지와 제어 페이지를 설치하고 Codex에 적용할까요?':'브릿지와 제어 페이지 설치를 다시 적용할까요?',result.installRequired))await install(io,manager);
+  const target=manager.webUiEnabled?'브릿지와 제어 페이지':'브릿지';
+  if(await io.confirm(result.installRequired?`${target}를 설치하고 Codex에 적용할까요?`:`${target} 설치를 다시 적용할까요?`,result.installRequired))await install(io,manager);
 }
 
 async function install(io,manager){
-  io.write('브릿지·Codex 연결·제어 페이지를 적용합니다. 서비스 점검까지 잠시 기다리세요…');
-  const result=await manager.installLocal();io.write(`적용 완료 · 제어 페이지: ${result.controlUrl}`);
+  io.write(`${manager.webUiEnabled?'브릿지·Codex 연결·제어 페이지':'브릿지·Codex 연결'}를 적용합니다. 서비스 점검까지 잠시 기다리세요…`);
+  const result=await manager.installLocal();io.write(result.webUiEnabled?`적용 완료 · 제어 페이지: ${result.controlUrl}`:'적용 완료 · 터미널에서 계속 관리할 수 있습니다.');
   io.write('Codex를 다시 시작하면 새 연결 설정이 반영됩니다. 각 PC의 ChatGPT 로그인은 그대로 유지합니다.');
 }
 
 async function showStatus(io,manager) {
   const status=await manager.status();
   if(!status.configured){io.write('아직 연결이 없습니다. 1번 메뉴에서 시작하세요.');return;}
-  io.write(`Pod: ${status.settings.upstreamUrl}\nGateway 키: ${status.settings.keyConfigured?'저장됨':'없음'}\nCaveman: ${status.settings.compression?'ON':'OFF'}\n로컬 브릿지: ${yesNo(status.bridge.ok)}\n서버 연결: ${yesNo(status.gateway.ok)}\n제어 페이지: ${status.controlUrl}\nSSH 관리: ${status.settings.management?.host??'미설정'}\n설정 위치: ${status.codexHome}`);
+  io.write(`Pod: ${status.settings.upstreamUrl}\nGateway 키: ${status.settings.keyConfigured?'저장됨':'없음'}\nCaveman: ${status.settings.compression?'ON':'OFF'}\n로컬 브릿지: ${yesNo(status.bridge.ok)}\n서버 연결: ${yesNo(status.gateway.ok)}\n이번 실행 모드: ${status.webUiEnabled?'터미널 + 웹':'터미널 전용'}${status.webUiEnabled?'\n제어 페이지: '+status.controlUrl:''}\nSSH 관리: ${status.settings.management?.host??'미설정'}\n설정 위치: ${status.codexHome}`);
   if(status.gateway.error)io.write(explainError({message:status.gateway.error}));
 }
 
@@ -166,8 +172,9 @@ async function remoteAction(io,manager,action) {
 
 export async function runManagerMenu(manager,io) {
   io.write('Caveman + OpenCodex 올인원 관리\n설정과 키는 이 PC에 저장하며 다른 PC의 설정과 자동 동기화하지 않습니다.');
+  io.write(manager.webUiEnabled?'관리 모드: 터미널 + 웹 제어 페이지':'관리 모드: 터미널 전용 · GUI/브라우저가 필요하지 않습니다.');
   for(;;){
-    io.write('\n1 연결 설정 / API 키 지정\n2 로컬 브릿지·제어 페이지 설치/적용\n3 현재 연결 상태\n4 Caveman ON/OFF\n5 모델 카탈로그 수동 동기화\n6 연결 진단\n7 로컬 재시작 / Codex 연결 재적용\n8 서버 상태\n9 서버 재시작\n10 서버 Git + 최신 버전 업데이트\n11 서버 최신 버전 업데이트 (Git 유지)\n12 SSH 관리 연결 설정\n13 서버 업데이트 확인\n0 종료');
+    io.write(`\n1 연결 설정 / API 키 지정\n2 ${manager.webUiEnabled?'로컬 브릿지·제어 페이지':'로컬 브릿지·Codex 연결'} 설치/적용\n3 현재 연결 상태\n4 Caveman ON/OFF\n5 모델 카탈로그 수동 동기화\n6 연결 진단\n7 로컬 재시작 / Codex 연결 재적용\n8 서버 상태\n9 서버 재시작\n10 서버 Git + 최신 버전 업데이트\n11 서버 최신 버전 업데이트 (Git 유지)\n12 SSH 관리 연결 설정\n13 서버 업데이트 확인\n14 서버 모델 카탈로그 갱신\n0 종료`);
     let choice;try{choice=await io.ask('선택','0');}catch(error){if(safeError(error)==='CANCELLED')return;throw error;}
     if(choice==='0')return;
     try {
@@ -186,7 +193,7 @@ export async function runManagerMenu(manager,io) {
         if(result.warnings?.length)io.write('주의 항목: '+result.warnings.filter(v=>typeof v==='string'&&/^[a-z_]+$/.test(v)).join(', '));
       }else if(choice==='7'){
         if(await io.confirm('로컬 서비스를 다시 적용하고 Codex를 브릿지에 연결한 뒤 재시작할까요? 진행 중인 요청이 끊길 수 있습니다.')){await manager.restartLocal();io.write('로컬 서비스 재시작 완료. Codex를 다시 시작하면 연결 설정이 반영됩니다.');}
-      }else if(['8','9','10','11','13'].includes(choice))await remoteAction(io,manager,{'8':'status','9':'restart','10':'git-update','11':'latest-update','13':'check'}[choice]);
+      }else if(['8','9','10','11','13','14'].includes(choice))await remoteAction(io,manager,{'8':'status','9':'restart','10':'git-update','11':'latest-update','13':'check','14':'catalog'}[choice]);
       else if(choice==='12'){
         const c=manager.settings();if(!c)throw Error('NOT_CONFIGURED');
         await manager.saveManagement(await promptManagement(io,c.upstreamUrl,c.management));io.write('SSH 연결을 확인하고 저장했습니다.');

@@ -5,7 +5,7 @@ Windows/Linux의 기본 `http://127.0.0.1:18786/`에서 현재 환경의 연결�
 
 ## 설치
 
-Windows에서 `Manage.cmd`, Linux/WSL에서 `./Manage.sh`를 실행하면 터미널에서 주소·키를
+Windows에서 `Manage.cmd`, Linux/WSL에서 `./Manage.sh --with-web-ui`를 실행하면 터미널에서 주소·키를
 입력하고 브리지와 제어 페이지를 함께 설치할 수 있습니다. [관리 메뉴 안내](MANAGER.md)를 참고하세요.
 아래는 개별 설치 명령입니다.
 

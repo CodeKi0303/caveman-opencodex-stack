@@ -46,6 +46,7 @@ export function parseManagerArgs(argv,{env=process.env,home=os.homedir()}={}) {
   for (let index=0; index<argv.length; index++) {
     const arg=argv[index];
     if (['--help','--status'].includes(arg)) {if (options[arg.slice(2)]) throw Error('USAGE'); options[arg.slice(2)]=true;}
+    else if (['--headless','--with-web-ui'].includes(arg)) {if (options.webUiEnabled!==undefined) throw Error('USAGE'); options.webUiEnabled=arg==='--with-web-ui';}
     else if (['--system','--user'].includes(arg)) {if (options.scope) throw Error('USAGE'); options.scope=arg.slice(2);}
     else if (arg==='--codex-home') {if (options.codexHome || !argv[index+1] || argv[index+1].startsWith('--')) throw Error('USAGE'); options.codexHome=argv[++index];}
     else throw Error('USAGE');
@@ -94,8 +95,10 @@ async function jsonRequest(fetchFn,url,options={},limit=16*1024*1024) {
   } catch {throw Error('INVALID_SERVER_RESPONSE');}
 }
 
-export function createManager({codexHome,scope,platform=process.platform,env=process.env,nodePath=process.execPath,
+export function createManager({codexHome,scope,webUiEnabled:requestedWebUi,platform=process.platform,env=process.env,nodePath=process.execPath,
   fetchFn=fetch,client=runClient,remote=remoteCommand,run=runQuiet,secureFile=protectKey}={}) {
+  if(requestedWebUi!==undefined&&typeof requestedWebUi!=='boolean')throw Error('USAGE');
+  const webUiEnabled=requestedWebUi??platform==='win32',mode=webUiEnabled?'web-ui':'headless';
   const home=path.resolve(codexHome || env.CODEX_HOME || path.join(os.homedir(),'.codex'));
   const directory=path.join(home,'caveman-stack'),configPath=path.join(directory,'native-bridge.json');
   const settings=()=>parseStored(readBytes(configPath));
@@ -123,12 +126,12 @@ export function createManager({codexHome,scope,platform=process.platform,env=pro
   }
   async function status() {
     const c=settings();
-    if(!c)return {ok:true,configured:false,codexHome:home,scope:serviceScope()};
+    if(!c)return {ok:true,configured:false,codexHome:home,scope:serviceScope(),mode,webUiEnabled};
     let gatewayState;try{gatewayState=await gateway(c);}catch(error){gatewayState={ok:false,error:safeError(error)};}
     let keyConfigured=false;try{keyOf(c);keyConfigured=true;}catch{}
-    return {ok:true,configured:true,codexHome:home,scope:serviceScope(),settings:{upstreamUrl:c.upstreamUrl,compression:c.compression!==false,
+    return {ok:true,configured:true,codexHome:home,scope:serviceScope(),mode,webUiEnabled,settings:{upstreamUrl:c.upstreamUrl,compression:c.compression!==false,
       port:c.port,controlPort:c.controlPort??18786,keyConfigured,management:c.management?{host:c.management.host,repo:c.management.repo,keyConfigured:fs.existsSync(c.management.keyFile??'')}:null},
-      bridge:await bridge(c),gateway:gatewayState,controlUrl:`http://127.0.0.1:${c.controlPort??18786}/`};
+      bridge:await bridge(c),gateway:gatewayState,...(webUiEnabled?{controlUrl:`http://127.0.0.1:${c.controlPort??18786}/`}:{})};
   }
   async function publish(before,next) {
     if(!same(readBytes(configPath),before))throw Error('CONCURRENT_EDIT');
@@ -195,17 +198,19 @@ export function createManager({codexHome,scope,platform=process.platform,env=pro
     let configured;
     try{configured=await client([...clientArgs('configure',c),'--provider','openai','--bridge-url',`http://127.0.0.1:${c.port}/v1`]);}
     catch{throw Error('BRIDGE_INSTALLED_CLIENT_FAILED');}
-    try {
-      if(platform==='win32')await run('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(scripts,'install-control-panel.ps1'),'-CodexHome',home,'-NodePath',nodePath]);
-      else await run(nodePath,[path.join(scripts,'install-control-panel-linux.mjs'),'--codex-home',home,'--node-path',nodePath,'--'+serviceScope()]);
-    }catch{throw Error('BRIDGE_INSTALLED_PANEL_FAILED');}
-    return {ok:true,restartCodex:configured.restartCodex,controlUrl:`http://127.0.0.1:${c.controlPort??18786}/`,scope:serviceScope()};
+    if(webUiEnabled){
+      try {
+        if(platform==='win32')await run('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(scripts,'install-control-panel.ps1'),'-CodexHome',home,'-NodePath',nodePath]);
+        else await run(nodePath,[path.join(scripts,'install-control-panel-linux.mjs'),'--codex-home',home,'--node-path',nodePath,'--'+serviceScope()]);
+      }catch{throw Error('BRIDGE_INSTALLED_PANEL_FAILED');}
+    }
+    return {ok:true,restartCodex:configured.restartCodex,mode,webUiEnabled,...(webUiEnabled?{controlUrl:`http://127.0.0.1:${c.controlPort??18786}/`}:{}),scope:serviceScope()};
   }
   async function remoteOperation(action) {
     if(!['status','check','restart','git-update','latest-update','catalog'].includes(action))throw Error('INVALID_ACTION');
     const c=required();validateManagement(c.management,c.upstreamUrl);return remote(c,action);
   }
-  return {codexHome:home,configPath,settings,defaults:defaultPorts,serviceScope,status,saveConnection,saveManagement,setCompression,installLocal,
+  return {codexHome:home,configPath,mode,webUiEnabled,settings,defaults:defaultPorts,serviceScope,status,saveConnection,saveManagement,setCompression,installLocal,
     restartLocal:installLocal,sync:()=>client(clientArgs('sync',required())),doctor:()=>{const c=required();return client([...clientArgs('doctor',c),'--provider','openai','--bridge-url',`http://127.0.0.1:${c.port}/v1`]);},remoteOperation};
 }
 

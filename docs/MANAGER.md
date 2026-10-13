@@ -6,17 +6,53 @@
 ## 실행
 
 - Windows: `Manage.cmd` 더블클릭.
-- Linux/WSL: 저장소에서 `./Manage.sh`.
+- Linux/WSL: 저장소에서 `./Manage.sh`. 기본 터미널 전용이며 GUI·브라우저가 필요하지 않습니다.
 - 공통: `npm run manage`.
 - 다른 Codex 홈: `npm run manage -- --codex-home /path/to/.codex`.
 - root의 Linux 시스템 서비스: `./Manage.sh --system`.
 - 읽기 전용 상태: `npm run manage -- --status`.
+- 웹 제어 페이지도 설치: `./Manage.sh --with-web-ui`.
+- Windows에서 웹 제어 페이지 설치 생략: `Manage.cmd --headless`.
 
 Node.js 22.13 이상과 npm이 필요합니다. Node.js가 없으면 LTS 버전을 설치한 뒤 다시 실행합니다.
 필요한 라이브러리가 없는 첫 대화형 실행에서는 `npm ci --ignore-scripts` 실행 여부를 묻습니다.
 이미 설치돼 있으면 다시 설치하지 않습니다. 상태 조회는 라이브러리를 자동 설치하지 않습니다.
 Linux/WSL의 서비스 설치에는 systemd가 필요하며, 일반 사용자는 사용자 서비스를 사용합니다.
 WSL에서는 Windows용 Node 실행 파일이 아닌 Linux용 Node를 사용하세요.
+
+## GUI 없는 Linux·SSH 접속
+
+일반 SSH로 Linux에 로그인한 뒤 저장소 디렉터리에서 실행합니다.
+
+```bash
+./Manage.sh
+# root 계정의 시스템 서비스 설치/관리
+./Manage.sh --system
+```
+
+숫자 메뉴와 숨김 키 입력으로 모든 작업을 수행합니다. X11·Wayland·브라우저·데스크톱 패키지는
+필요하지 않습니다. 기본 설치는 모델 요청을 전달하는 브리지와 Codex 연결만 적용하며,
+웹 제어 페이지 서비스를 설치하거나 실행하지 않습니다. 서버의 OpenCodex 자체 관리 UI와는 별개입니다.
+
+SSH 접속과 메뉴 실행을 한 줄로 묶을 때는 입력용 터미널을 할당합니다.
+
+```bash
+ssh -t USER@HOST 'cd /path/to/caveman-opencodex-stack && ./Manage.sh'
+```
+
+파이프나 `ssh -T`로 대화형 메뉴를 실행하지 마세요. 자동 점검에는 입력이 필요 없는
+`./Manage.sh --status`를 사용할 수 있습니다. 별도 경로의 Node를 사용한다면:
+
+```bash
+NODE_BINARY=/absolute/path/to/node ./Manage.sh
+```
+
+서비스 설치에는 systemd가 필요합니다. 사용자 서비스가 SSH 로그아웃 이후나 로그인 전부터
+동작해야 하면 관리자가 해당 사용자에 `loginctl enable-linger USER`를 설정할 수 있습니다.
+메뉴가 이 정책을 자동 변경하지는 않습니다. root의 `--system` 서비스는 시스템 시작 시 실행됩니다.
+
+웹 페이지를 원하는 Linux 사용자만 `--with-web-ui`를 추가합니다. 이 옵션과 `--headless`는
+현재 실행의 설치 범위를 선택합니다. 이미 존재하는 웹 서비스를 자동으로 제거하거나 중지하지 않습니다.
 
 Windows 바탕화면에 메뉴 바로가기를 만들려면:
 
@@ -32,7 +68,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-manager-
 1. 연결 설정에서 Pod API 주소를 입력합니다. 예: `http://192.168.50.61:18787/v1`.
 2. 게이트웨이 키를 숨김 입력하거나 SSH로 가져오기를 선택합니다. 기존 키가 있으면 유지할 수 있습니다.
 3. 인증된 카탈로그와 서버 기능 검사가 통과하면 연결을 저장합니다.
-4. 로컬 설치/적용을 선택해 브리지와 제어 페이지를 시작하고 Codex를 연결합니다.
+4. 로컬 설치/적용을 선택해 브리지를 시작하고 Codex를 연결합니다. 웹 UI를 선택한 경우 제어 페이지도 설치합니다.
 5. 연결 진단 후 Codex 앱/CLI를 재시작합니다.
 
 | 인증 정보 | 용도 | 메뉴의 처리 |
@@ -50,7 +86,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-manager-
 기본 로컬 포트는 Windows/Linux에서 브리지 `18788`, 제어 페이지 `18786`입니다.
 WSL의 새 설정은 충돌을 줄이기 위해 각각 `18789`, `18785`를 사용합니다.
 처음 설정할 때 포트를 선택하며, 이미 설정된 포트는 유지합니다.
-제어 페이지는 해당 환경의 `127.0.0.1`에서만 열립니다.
+웹 UI를 선택한 경우 제어 페이지는 해당 환경의 `127.0.0.1`에서만 열립니다.
 
 ## SSH로 키 가져오기와 서버 관리
 
@@ -67,8 +103,9 @@ SSH 대상(예: `root@192.168.50.61`), 이 PC의 SSH 개인키 경로, 서버 �
 |---|---|
 | Caveman ON/OFF | 현재 클라이언트의 새 모델 요청 |
 | 모델 목록 동기화 | 현재 Codex 홈의 로컬 카탈로그 |
+| 서버 모델 카탈로그 갱신 | 서버가 제공하는 카탈로그 재생성. 이후 로컬 동기화로 다운로드 |
 | 연결 진단 | 현재 설정·로그인 메타데이터·게이트웨이·복구 MCP의 읽기 전용 검사 |
-| 로컬 설치/적용·재시작 | 현재 OS 사용자의 소유권이 확인된 브리지·제어 페이지 및 Codex 연결 |
+| 로컬 설치/적용·재시작 | 현재 OS 사용자의 소유권이 확인된 브리지 및 Codex 연결. 웹 UI 선택 시 제어 페이지도 포함 |
 | 서버 상태 | 실제 Podman 컨테이너 동작·상태와 Git 변경 여부 |
 | 서버 재시작 | 현재 운영 이미지를 사용한 컨테이너 재기동 |
 | 서버 Git 업데이트 | 서버 저장소 fast-forward 후 최신 안정 Caveman·OpenCodex·컨테이너 Codex 배포 |

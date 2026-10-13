@@ -84,6 +84,8 @@ ADMIN_PORT=20100
 
 **파일 편집 없이 설정하려면 관리 메뉴를 실행하세요.** Windows는 저장소의 `Manage.cmd`를
 더블클릭하고, Linux/WSL은 `./Manage.sh`를 실행합니다. `npm run manage`도 같은 메뉴입니다.
+Linux/WSL은 기본 터미널 전용으로 GUI·브라우저 없이 SSH에서 사용할 수 있습니다.
+웹 제어 페이지도 설치하려면 `./Manage.sh --with-web-ui`를 사용합니다.
 Node.js 22.13+가 필요하며, 새 clone에 라이브러리가 없으면 첫 실행에서 설치 여부를 묻습니다.
 
 Pod API 주소와 **게이트웨이 키**를 한 번 입력하면 다음 실행에서 재사용합니다. 키 입력은
