@@ -28,6 +28,10 @@ jobs:
             $opensslDirectory | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           }
       - run: node --test tests/*.test.mjs
+      - name: Verify hidden Windows bridge launcher
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./tests/native-bridge-installer.test.ps1
       - run: python3 -m py_compile stack
         if: runner.os == 'Linux'
       - run: python3 -m unittest discover -s tests -p '*_test.py'

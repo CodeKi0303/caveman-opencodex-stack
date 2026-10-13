@@ -1,0 +1,88 @@
+import importlib.util
+import json
+from pathlib import Path
+import subprocess
+import tempfile
+import types
+import unittest
+from unittest.mock import patch
+
+spec=importlib.util.spec_from_file_location('server_control',Path(__file__).resolve().parents[1]/'scripts/server-control.py')
+control=importlib.util.module_from_spec(spec);spec.loader.exec_module(control)
+
+class ServerControlTests(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.repo=Path(self.temp.name)
+        (self.repo/'stack').write_text('# fixture')
+        (self.repo/'data').mkdir()
+        self.original={'package.json':json.dumps({'dependencies':{'@caveman-ai/cli':'1.0.0','@bitkyc08/opencodex':'2.0.0'}}).encode(),'package-lock.json':b'{"packages":{}}'}
+        for p,b in self.original.items():(self.repo/p).write_bytes(b)
+    def request(self,**extra):return {'repo':str(self.repo),'action':'update','component':'caveman','version':'1.1.0',**extra}
+    def fake(self,failure=False,versions=None):
+        versions=versions or {'@caveman-ai/cli':'1.0.0','@bitkyc08/opencodex':'2.0.0'}
+        manifests={'package.json':json.dumps({'dependencies':versions}),
+            'package-lock.json':json.dumps({'packages':{'':{'dependencies':versions},**{'node_modules/'+k:{'version':v} for k,v in versions.items()}}})}
+        def pod(*args,**kw):
+            if args[0]=='exec':return types.SimpleNamespace(stdout=json.dumps(manifests if 'package-lock.json' in args[-1] else versions))
+            self.assertEqual(args[0],'run');mount=args[args.index('--volume')+1];stage=Path(mount.rsplit(':/work:Z',1)[0]);p=json.loads((stage/'package.json').read_text())
+            (stage/'package-lock.json').write_text(json.dumps({'packages':{'':{'dependencies':p['dependencies']},**{'node_modules/'+k:{'version':v} for k,v in p['dependencies'].items()}}}))
+        def stage_source(stage):
+            stage.mkdir()
+            (stage/'source-marker').write_text('source copied')
+        def update(_,context):
+            self.assertTrue((context/'source-marker').exists())
+            dependencies=json.loads((context/'package.json').read_text())['dependencies']
+            self.assertEqual(dependencies['@caveman-ai/cli'],'1.1.0')
+            for key,value in versions.items():
+                if key!='@caveman-ai/cli':self.assertEqual(dependencies[key],value)
+            for p,b in self.original.items():self.assertEqual((self.repo/p).read_bytes(),b)
+            if failure:raise RuntimeError('fixture update failure')
+        return types.SimpleNamespace(config=lambda:{},name=lambda c:'fixture',pod=pod,run=lambda *a,**k:None,
+            image_id=lambda c:'fixture-image',runtime_env=lambda c:[],bundle_ca=lambda:None,update=update,stage_source=stage_source,
+            cleanup_resolver=lambda container,owner:None)
+    def test_invalid_components_and_versions_do_not_execute(self):
+        for extra in [{'component':'shell'},{'version':'1.0.0; echo secret'},{'action':'exec'}]:
+            with self.assertRaises(ValueError):control.validate(self.request(**extra))
+    def test_success_stages_only_selected_dependency_and_preserves_checkout(self):
+        with patch.object(control,'load_stack',return_value=self.fake()),patch.object(control.shutil,'disk_usage',return_value=types.SimpleNamespace(free=10*1024**3)):
+            self.assertTrue(control.execute(self.request())['ok'])
+        for p,b in self.original.items():self.assertEqual((self.repo/p).read_bytes(),b)
+        self.assertEqual(len(list((self.repo/'backups').glob('control-manifests-*'))),1)
+        record=next((self.repo/'data/releases').glob('*/release.json'))
+        self.assertEqual(json.loads(record.read_text())['status'],'applied')
+    def test_failed_update_preserves_both_manifests_and_records_failure(self):
+        with patch.object(control,'load_stack',return_value=self.fake(True)),patch.object(control.shutil,'disk_usage',return_value=types.SimpleNamespace(free=10*1024**3)):
+            with self.assertRaises(RuntimeError):control.execute(self.request())
+        for p,b in self.original.items():self.assertEqual((self.repo/p).read_bytes(),b)
+        record=next((self.repo/'data/releases').glob('*/release.json'))
+        self.assertEqual(json.loads(record.read_text())['status'],'failed')
+    def test_selective_update_does_not_downgrade_other_products_after_latest_release(self):
+        versions={'@caveman-ai/cli':'1.0.0','@bitkyc08/opencodex':'9.0.0','@openai/codex':'5.0.0'}
+        with patch.object(control,'load_stack',return_value=self.fake(versions=versions)),patch.object(control.shutil,'disk_usage',return_value=types.SimpleNamespace(free=10*1024**3)):
+            self.assertTrue(control.execute(self.request())['ok'])
+        record=next((self.repo/'data/releases').glob('*/package.json'))
+        self.assertEqual(json.loads(record.read_text())['dependencies'],{**versions,'@caveman-ai/cli':'1.1.0'})
+        for p,b in self.original.items():self.assertEqual((self.repo/p).read_bytes(),b)
+    def test_same_installed_version_is_noop_even_when_git_pin_is_older(self):
+        versions={'@caveman-ai/cli':'1.1.0','@bitkyc08/opencodex':'9.0.0'}
+        stack=self.fake(versions=versions)
+        with patch.object(control,'load_stack',return_value=stack),patch.object(stack,'update') as update:
+            self.assertTrue(control.execute(self.request())['unchanged'])
+            update.assert_not_called()
+        self.assertFalse((self.repo/'backups').exists())
+        for p,b in self.original.items():self.assertEqual((self.repo/p).read_bytes(),b)
+    def test_resolver_timeout_cleans_owned_container_without_changing_checkout(self):
+        stack=self.fake();original_pod=stack.pod
+        def timeout(*args,**kw):
+            if args[0]=='run':raise subprocess.TimeoutExpired('podman',300)
+            return original_pod(*args,**kw)
+        with patch.object(control,'load_stack',return_value=stack),patch.object(control.shutil,'disk_usage',return_value=types.SimpleNamespace(free=10*1024**3)),patch.object(stack,'pod',side_effect=timeout),patch.object(stack,'cleanup_resolver') as cleanup,patch.object(stack,'update') as update:
+            with self.assertRaises(subprocess.TimeoutExpired):control.execute(self.request())
+            cleanup.assert_called_once()
+            container,owner=cleanup.call_args.args
+            self.assertEqual(container,'caveman-control-resolver-'+owner)
+            update.assert_not_called()
+        for p,b in self.original.items():self.assertEqual((self.repo/p).read_bytes(),b)
+
+if __name__=='__main__':unittest.main()

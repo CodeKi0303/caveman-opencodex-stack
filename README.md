@@ -4,7 +4,7 @@ Linux에서 **Codex → 게이트웨이 → Caveman 압축 프록시 → OpenCod
 Caveman이 요청의 압축 가능한 입력(예: 긴 도구 결과)을 줄여 OpenCodex로 전달하고,
 OpenCodex는 설정된 제공자·모델 정책에 따라 해당 모델 API로 요청을 전달합니다.
 모든 입력이 압축되는 것은 아니며 압축 조건에 맞지 않는 내용은 유지합니다.
-호스트에는 **Podman 5+, slirp4netns, Python 3.11+, Git**이 필요합니다. 클라이언트 설정 도구는 Node.js 22.13+를 사용하며, 환경변수 기반 회사 프록시를 쓰는 클라이언트는 Node.js 24.14+를 권장합니다.
+호스트에는 **Podman 4.9.3+, slirp4netns, Python 3.11+, Git**이 필요합니다. 클라이언트 설정 도구는 Node.js 22.13+를 사용하며, 환경변수 기반 회사 프록시를 쓰는 클라이언트는 Node.js 24.14+를 권장합니다.
 Windows/WSL Codex는 HTTP(S)로 접속하므로 작업 파일과 도구 실행은 각 PC에 남습니다.
 개인 사용 기준으로 본인의 여러 클라이언트가 같은 게이트웨이와 압축 원문 DB를 공유합니다.
 
@@ -38,6 +38,38 @@ proxy/MCP 엔진은 **BSL-1.1**입니다. 해당 Additional Use Grant는 자체 
 [정확한 release 고지](THIRD_PARTY.md)를 함께 확인하세요.
 
 ## 1. 시작
+
+Linux·WSL에서는 **올인원 메뉴로 설치하고 관리**할 수 있습니다. 처음에 설치 형태와 접속 범위를
+선택하면 서버·브리지·웹 제어 페이지와 자동 시작 서비스를 차례로 구성합니다. 파일을 직접 편집하거나
+키·설정 경로를 명령마다 입력할 필요가 없습니다.
+
+기본 `main` 브랜치를 받아 다음과 같이 시작합니다.
+
+```bash
+git clone \
+  https://github.com/CodeKi0303/caveman-opencodex-stack.git caveman-podman
+cd caveman-podman
+./manage
+```
+
+- **이 Linux에 전체 서버 설치**: Podman 서버부터 Codex 연결·웹 제어까지 구성합니다.
+- **기존 서버에 클라이언트 연결**: 서버 주소와 게이트웨이 키를 한 번 입력하고 이 사용자의 Codex를 연결합니다.
+
+메뉴 **1 → 설치 방식 선택 → 표시되는 질문에 답하기**로 진행합니다. 새 전체 서버는 키를 자동으로 만들고
+연결하며, 기존 서버 연결의 키는 숨김 입력 또는 키 파일 선택으로 받습니다. 포트는 추천값을 사용할 수 있습니다.
+로그인과 연결 진단이 끝나면 **10번 `Codex 실행`**으로 바로 작업을 시작합니다. 저장소에 준비된 Codex CLI를
+사용하므로 전역 `codex` 명령을 따로 설치하거나 찾을 필요가 없습니다.
+
+설치 후에도 `./manage`에서 로그인, 연결 진단, 압축 ON/OFF, 모델 목록 동기화, 업데이트와 재시작을
+선택합니다. 웹 제어 페이지도 함께 제공하며 GUI 없는 원격 Linux는 다른 PC의 브라우저로 접속합니다.
+Node가 없으면 런타임 설치 동의를 요청하고, 서버 패키지가 부족하면 지원하는 패키지 관리자의
+설치 옵션을 안내합니다. 15분 카탈로그 예약은 만들지 않습니다.
+
+일반 Linux 사용자로 실행하면 그 사용자의 Codex와 rootless Podman을 사용합니다. root로 실행하면
+root의 설정·컨테이너를 사용하므로 기존 설치와 같은 계정으로 실행하세요. WSL은 Linux 홈에 clone하고
+WSL 터미널에서 실행합니다. [두 설치 시나리오와 운영 안내](docs/ALL-IN-ONE.md)를 참고하세요.
+
+### 개별 명령으로 설치
 
 일반 Linux 사용자로 실행하는 rootless Podman을 권장합니다. `sudo podman`과 `podman`의 저장소는 다릅니다.
 
@@ -81,6 +113,12 @@ ADMIN_PORT=20100
 관리 UI에는 HTTPS reverse proxy를 적용하세요. `GATEWAY_TLS_*`는 관리 UI에 적용되지 않습니다.
 
 ## 2. 클라이언트 연결과 모델 목록
+
+**Android Remote를 함께 쓰는 개인 사용자는 아래의 기본 `openai` provider + 로컬 브리지
+설치 절차를 권장합니다.** 일부 앱 버전의 기본 세션 목록은 provider별로 필터링되어 사용자 정의
+provider로 생성한 대화가 누락될 수 있습니다. 아래 일반 연결 예시는 브리지 없이
+`caveman_stack` provider를 사용하는 방식입니다. 이미 기본 `openai` 브리지가 설정된 경우
+`configure`를 다시 실행해도 해당 연결을 유지하고, 브리지가 정지했으면 설정 변경을 거부합니다.
 
 서버의 `secrets/gateway-key` 파일을 본인의 Windows/WSL 클라이언트에 보관합니다.
 **관리자 키·사용자의 auth.json·CCR DB는 복사하지 않습니다.** 각 Codex 클라이언트에서 로그인합니다.
@@ -168,7 +206,85 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-shortc
 명시적으로 자동 갱신을 원하는 사용자를 위해 기존 `schedule.mjs install`은 선택 기능으로 유지합니다.
 자세한 절차는 [운영 가이드](docs/OPERATIONS.md#클라이언트-카탈로그-동기화)를 참고하세요.
 
+### Windows에서 기본 `openai` provider 사용
+
+Codex Remote에서 기존 세션과 새 세션의 provider ID를 `openai`로 맞추려면 기본 provider와
+로컬 브리지를 함께 사용합니다. 기본 `openai` provider는 사용자 정의 게이트웨이 헤더를
+설정할 수 없으므로 브리지가 `127.0.0.1`에서 요청을 받아 게이트웨이 키를 추가합니다.
+Codex 로그인 인증과 계정 헤더는 그대로 서버로 전달하며, 서버의 기존 키 인증도 유지합니다.
+
+```powershell
+# 로그인 시 자동 시작하는 로컬 브리지를 설치하고 즉시 상태 확인
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-native-bridge.ps1 `
+  -UpstreamUrl http://192.168.50.61:18787/v1 `
+  -KeyFile C:\Users\me\caveman-private\gateway-key
+
+# 기본 provider를 선택하고 로컬 브리지로 모델 요청을 전달
+node .\scripts\client.mjs configure --provider openai `
+  --url http://192.168.50.61:18787/v1 `
+  --key-file C:\Users\me\caveman-private\gateway-key `
+  --bridge-url http://127.0.0.1:18788/v1
+```
+
+설치기는 현재 사용자에게 `Caveman Native OpenAI Bridge` 로그인 예약을 등록합니다.
+이 예약은 콘솔 창 없이 브리지를 계속 실행하고 비정상 종료 시 재시도합니다.
+모델 목록 동기화 주기는 등록하지 않습니다. `-CodexHome`, `-Port`, `-NodePath`로 설치 위치와
+실행 경로를 지정할 수 있습니다. 저장소와 Node 실행 파일은 설치 후에도 해당 위치에 있어야 합니다.
+변경 전 설정과 기존 예약은 `caveman-stack/native-bridge-backups/`에 백업됩니다.
+같은 이름의 다른 예약이나 소유권을 확인할 수 없는 포트 사용 프로세스는 중지하지 않습니다.
+
+`openai_base_url`은 로컬 브리지를 가리키고, 복구 MCP와 수동 카탈로그 동기화는 계속 원격 서버를
+사용합니다. `model_providers.openai` 테이블은 만들지 않습니다. 설정 적용 후 Codex를 재시작하면
+새 세션은 `openai` provider로 생성됩니다. **기존 세션의 provider 기록은 이 명령으로 바뀌지 않습니다.**
+기존 세션을 전환하려면 Codex를 종료한 상태에서 세션 DB와 대화 파일을 함께 백업하고 별도로
+마이그레이션해야 합니다. 파일의 byte offset을 참조하는 기록도 있어 JSONL 전체를 다시 저장하면 안 됩니다.
+
+### Linux·WSL에서 기본 `openai` provider 사용
+
+Linux에서는 같은 브리지를 systemd 서비스로 설치합니다. 일반 사용자와 WSL은 `--user`,
+root가 운영하는 서버는 `--system`을 사용합니다. systemd와 Node.js 22.13 이상이 필요합니다.
+
+```bash
+# WSL 사용자 예시: Windows의 18788과 구분하여 18789 사용
+node scripts/install-native-bridge-linux.mjs --user \
+  --upstream-url http://192.168.50.61:18787/v1 \
+  --key-file "$HOME/.codex/caveman-stack/gateway-key" --port 18789
+node scripts/client.mjs configure --provider openai \
+  --url http://192.168.50.61:18787/v1 \
+  --key-file "$HOME/.codex/caveman-stack/gateway-key" \
+  --bridge-url http://127.0.0.1:18789/v1
+
+# 서버 root 예시: 실제 게이트웨이가 바인딩된 주소 사용
+node scripts/install-native-bridge-linux.mjs --system \
+  --codex-home /root/.codex --upstream-url http://192.168.50.61:18787/v1 \
+  --key-file /root/.codex/caveman-stack/gateway-key
+```
+
+서비스 이름은 `caveman-native-bridge.service`입니다. `--node-path`로 Node 실행 파일을 지정할 수
+있으며 기본값은 설치기를 실행한 Node입니다. 브리지 코드는 `<CODEX_HOME>/caveman-stack/`에
+복사하므로 서비스 기동에 Windows 드라이브나 원본 저장소가 필요하지 않습니다.
+키 내용은 서비스 파일에 넣지 않습니다. 설치기는 상태·프로세스 ID와 실제 카탈로그 접근을
+확인하고, 실패하면 이전 파일과 서비스 실행 상태를 복구합니다. 변경 전 파일은 같은 디렉터리의
+`native-bridge-backups/`에 저장합니다. 기존 서비스나 런타임 코드가 외부에서 수정된 경우 교체를 거부합니다.
+
+사용자 서비스는 사용자 systemd 관리자가 시작될 때 기동합니다. 로그인 전에도 필요하면 관리자가
+`loginctl enable-linger <사용자>`를 한 번 설정합니다. 위 개별 브리지 설치기는 linger 설정이나 카탈로그 타이머를
+변경하지 않습니다. 올인원 `./manage`에서는 linger 활성화를 선택할 수 있습니다. WSL은 배포판 자체가 실행 중이어야 하며 Windows 종료 후 WSL까지 자동 기동하는
+설정은 별도입니다. 상태는 `systemctl --user status caveman-native-bridge.service`로 확인합니다.
+시스템 서비스는 `--user`를 빼고 확인합니다. 설치 이후 `configure --provider openai`를 실행하고
+Codex를 재시작해야 새 provider 설정이 적용됩니다.
+
 ## 3. 설정 위치
+
+### 로컬 웹 제어 페이지
+
+Windows는 `scripts/install-control-panel.ps1`, Linux/WSL은 `node scripts/install-control-panel-linux.mjs`로
+설치합니다. 기본 주소는 `http://127.0.0.1:18786/`이며 Linux 서버에는 GUI가 필요하지 않습니다.
+Windows에서는 바탕화면 `Caveman Control` 바로가기도 만듭니다. Pod 주소·키, 이 PC의 압축 ON/OFF,
+카탈로그 수동 동기화, SSH를 통한 서버 패키지 버전 확인·업데이트를 제공합니다.
+같은 Linux 저장소의 Podman은 설치 시 직접 관리 모드를 지정해 SSH 개인키 없이 관리할 수 있습니다.
+서버와 로컬 브리지를 먼저 업데이트해야 하며, 자세한 설정과 복구 범위는
+[로컬 제어 페이지 운영 안내](docs/LOCAL-CONTROL.md)를 참고하세요.
 
 | 바꿀 내용 | 위치 / 명령 |
 |---|---|
@@ -198,9 +314,10 @@ OpenCodex에 외부 제공자를 추가할 때는 제공자의 URL·API 형식(�
 ## 4. 업데이트·백업·복구
 
 ```bash
-./stack backup                 # 잠시 중지 → 일관된 DB 복사 → 재기동
-# package.json의 버전을 검토해서 변경한 다음
-./stack lock                   # 잠금 파일 갱신 (호스트 npm 불필요)
+./stack git-update             # Git fast-forward + 최신 안정 버전 조회 + 검증 후 배포
+# Git 코드는 이미 가져왔거나 로컬 변경을 보존해야 하는 경우
+./stack update --latest        # 현재 소스로 최신 안정 버전 조회 + 검증 후 배포
+# 지정한 package.json/package-lock.json 버전 그대로 배포하려면
 ./stack update
 ```
 
@@ -208,7 +325,13 @@ OpenCodex에 외부 제공자를 추가할 때는 제공자의 URL·API 형식(�
 → 운영 교체 → 준비 상태·카탈로그 확인 순서로 실행합니다. 운영 교체 단계가 실패하면 이전 이미지와 DB로 복원합니다.
 빌드/후보 검증 실패 시 이전 서비스가 유지됩니다. 실제 모델 API 테스트는 계정 비용·인증이 필요하므로 자동 상태 검사와 구분합니다.
 업데이트에는 짧은 중단이 있습니다. 사용 중인 Codex/MCP를 닫고 유지보수 시간에 실행하세요.
-무인 `latest` 자동 교체 대신 검토 가능한 버전·잠금 파일 변경을 Git으로 배포합니다.
+`git-update`는 추적 브랜치가 있는 깨끗한 저장소에서만 `git pull --ff-only`를 실행합니다.
+단순 `git pull`은 서비스나 의존성을 변경하지 않습니다. 최신 조회 대상은 Caveman CLI·OpenCodex·컨테이너의 Codex CLI이며,
+npm의 `latest` 태그가 정식 버전일 때만 적용합니다. SDK·TOML·Node 기반 이미지는 저장소에 고정된 버전을 유지합니다.
+조회·빌드·검증 실패 시 성공으로 처리하거나 다른 버전으로 조용히 대체하지 않습니다.
+정확한 버전과 lockfile은 `data/releases/<실행 ID>/`에 보관하고 Git의 package 파일은 변경하지 않습니다.
+예약이나 주기적 갱신은 등록하지 않습니다. 로컬 PC의 Codex Desktop/CLI 및 모델 목록 동기화는 별도입니다.
+자세한 상태 확인과 systemd 실행 주의점은 [운영 가이드](docs/OPERATIONS.md#git과-최신-안정-버전-업데이트)를 참고하세요.
 
 ```bash
 ./stack rollback backups/20261002-120000

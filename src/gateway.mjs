@@ -13,7 +13,7 @@ function validateLimit(value) {
   if (!Number.isSafeInteger(value) || value < 1 || value > 268435456) throw Error('Invalid request limit');
 }
 const deniedHeaders = new Set(['connection','keep-alive','proxy-authenticate','proxy-authorization',
-  'te','trailer','transfer-encoding','upgrade','host','x-caveman-gateway-key',
+  'te','trailer','transfer-encoding','upgrade','host','x-caveman-gateway-key','x-caveman-compression',
   'forwarded','x-forwarded-for','x-forwarded-host','x-forwarded-proto']);
 export function addressPolicy(cidrs = '') {
   if (!cidrs.trim()) return () => true;
@@ -67,6 +67,10 @@ export function createGateway({key, request = http.request, audit = () => {}, ma
     const supplied = req.headers['x-caveman-gateway-key'];
     if (typeof supplied !== 'string' || Buffer.byteLength(supplied) !== Buffer.byteLength(key) ||
         !timingSafeEqual(Buffer.from(supplied),Buffer.from(key))) return sendError(res,401,'Gateway key required');
+    if(req.method==='GET'&&req.url==='/v1/stack-info') {
+      res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'}).end(JSON.stringify({
+        service:'caveman-lan-gateway',capabilities:{compressionSwitch:true}}));return;
+    }
     if (req.url === '/mcp') {
       if (recoveryClosed) return sendError(res,503,'Recovery is shutting down');
       void loadRecovery().then(async bridge => {
@@ -110,7 +114,11 @@ export function createGateway({key, request = http.request, audit = () => {}, ma
     const sidecarRoute = req.method === 'POST' &&
       (pathname === '/v1/alpha/search' || pathname === '/v1/responses/compact');
     if (req.method === 'POST' && req.url === '/v1/responses') {
-      port = 8787; upstreamPath = '/compat/opencodex/v1/responses';
+      const compression=req.headers['x-caveman-compression']??'on';
+      if(!['on','off'].includes(compression))return sendError(res,400,'Invalid compression mode');
+      port = compression==='off'?10101:8787;
+      upstreamPath = compression==='off'?'/v1/responses':'/compat/opencodex/v1/responses';
+      metadata.compression=compression;
     } else if (req.method === 'GET' && pathname === '/v1/models') {
       // Caveman compat has no catalog route. Metadata is read directly from OpenCodex.
       port = 10101; upstreamPath = req.url;
@@ -124,7 +132,7 @@ export function createGateway({key, request = http.request, audit = () => {}, ma
     } else return sendError(res,404,'Unsupported gateway route');
     metadata.upstream = imageRoute ? 'opencodex-images' : sidecarRoute
       ? pathname === '/v1/alpha/search' ? 'opencodex-search' : 'opencodex-compact'
-      : port === 8787 ? 'caveman-responses' : 'opencodex-models';
+      : port === 8787 ? 'caveman-responses' : pathname==='/v1/responses'?'opencodex-responses':'opencodex-models';
     const encoding = (req.headers['content-encoding'] ?? 'identity').toLowerCase();
     const encodings = imageRoute || sidecarRoute ? ['identity','gzip','deflate','zstd'] : ['identity'];
     if (!encodings.includes(encoding))

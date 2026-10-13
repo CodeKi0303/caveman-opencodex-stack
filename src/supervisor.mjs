@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import {spawn} from 'node:child_process';
+import {superviseComponents} from './process-supervisor.mjs';
 process.umask(0o077);
 for(const p of ['/state/opencodex','/state/codex','/state/caveman','/state/catalog']) fs.mkdirSync(p,{recursive:true,mode:0o700});
 const config='/state/codex/config.toml';
@@ -14,24 +14,11 @@ if(certs.length) {
   fs.writeFileSync(bundle,[fs.readFileSync('/etc/ssl/certs/ca-certificates.crt','utf8'),...certs.map(f=>fs.readFileSync('/certs/'+f,'utf8'))].join('\n'));
   Object.assign(env,{NODE_EXTRA_CA_CERTS:bundle,SSL_CERT_FILE:bundle,CURL_CA_BUNDLE:bundle,REQUESTS_CA_BUNDLE:bundle});
 }
-const children=[];
-let stopping=false;
-function stop(code=0) {
-  if(stopping)return;
-  stopping=true;
-  for(const p of children)p.kill('SIGTERM');
-  const timer=setTimeout(()=>{for(const p of children)p.kill('SIGKILL');process.exit(code);},12000);
-  timer.unref();
-  Promise.all(children.map(p=>p.exitCode!==null?Promise.resolve():new Promise(r=>p.once('exit',r)))).then(()=>process.exit(code));
-}
-for(const [bin,args,required=true] of [
-  ['/app/node_modules/.bin/bun',['/app/src/opencodex.ts']],
-  ['/opt/caveman/bin/caveman-proxy',[]],
-  [process.execPath,['/app/src/gateway.mjs']],
-  [process.execPath,['/app/src/catalog-refresh.mjs'],false]
-]) {
-  const p=spawn(bin,args,{env,stdio:['ignore','inherit','inherit']});children.push(p);
-  p.once('error',()=>{console.error(required?'Component failed to start':'Startup catalog refresh unavailable');if(required)stop(1);});
-  p.once('exit',()=>{if(required&&!stopping){console.error('Component exited; stopping stack');stop(1);}});
-}
-process.on('SIGTERM',()=>stop());process.on('SIGINT',()=>stop());
+const supervisor=superviseComponents([
+  {name:'opencodex',command:'/app/node_modules/.bin/bun',args:['/app/src/opencodex.ts']},
+  {name:'caveman',command:'/opt/caveman/bin/caveman-proxy'},
+  {name:'gateway',command:process.execPath,args:['/app/src/gateway.mjs']},
+  {name:'catalog',command:process.execPath,args:['/app/src/catalog-refresh.mjs'],required:false}
+],{env});
+process.on('SIGTERM',()=>supervisor.stop(0,'SIGTERM'));
+process.on('SIGINT',()=>supervisor.stop(0,'SIGINT'));

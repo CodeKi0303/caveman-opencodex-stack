@@ -3,6 +3,12 @@
 This repository contains deployment glue and a gateway, not vendored forks of the upstream projects.
 Its MIT license covers this repository's original code only; upstream licenses remain separate.
 
+The table describes the checked-in baseline. `stack git-update` / `stack update --latest`
+may select newer runtime products; exact versions and lockfiles are recorded under
+`data/releases/`. Installed upstream package notices remain in the image. Baseline binary
+notices below must not be assumed to describe a different binary release when redistributing
+an image; preserve that release's own notices as well.
+
 | Component | Pinned source | License information |
 |---|---|---|
 | OpenCodex | npm `@bitkyc08/opencodex@2.75.0`, https://github.com/lidge-jun/opencodex | MIT; notice preserved in `licenses/OpenCodex-MIT.txt` |
