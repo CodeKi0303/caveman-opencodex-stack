@@ -184,13 +184,16 @@ try {
         Wait-ForStoppedBridge $previousCommand $previousPort
     }
     if (@(Get-ListenerIds).Count -ne 0) { throw 'The requested bridge port is not available.' }
-    $nextConfig = [ordered]@{ upstreamUrl = $UpstreamUrl; keyFile = $KeyFile; port = $Port }
+    $nextConfig = [ordered]@{}
     if (Test-Path -LiteralPath $configPath) {
         $stored = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
-        foreach ($field in @('compression', 'management', 'controlPort')) {
-            if ($stored.PSObject.Properties.Name -contains $field) { $nextConfig[$field] = $stored.$field }
+        foreach ($property in $stored.PSObject.Properties) {
+            $nextConfig[$property.Name] = $property.Value
         }
     }
+    $nextConfig['upstreamUrl'] = $UpstreamUrl
+    $nextConfig['keyFile'] = $KeyFile
+    $nextConfig['port'] = $Port
     Write-Utf8File $configPath (($nextConfig | ConvertTo-Json -Depth 5) + "`n")
     Write-Utf8File $launcherPath $launcher
     Write-Utf8File $manifestPath (([ordered]@{

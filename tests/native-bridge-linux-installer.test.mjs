@@ -72,11 +72,14 @@ test('Linux install verifies catalog, installs only a bridge service and support
   assert.equal(f.enabled, true);
   assert.match(await fs.readFile(f.plan.unitPath, 'utf8'), /WantedBy=default.target/);
   assert.deepEqual(await fs.readFile(f.plan.bridgePath), await fs.readFile(f.plan.sourceBridgePath));
+  const customized = {...JSON.parse(await fs.readFile(f.plan.configPath, 'utf8')), maxRequestBytes: 1234567, timeoutMs: 76543, controlPort: 19876, compression: false};
+  await fs.writeFile(f.plan.configPath, JSON.stringify(customized, null, 2) + '\n');
   const config = await fs.readFile(f.plan.configPath, 'utf8');
   assert.equal(JSON.parse(config).keyFile, f.plan.keyFile);
   assert.ok(!config.includes('fixture-key-'));
   const second = await installBridge(f.plan, f.dependencies);
   assert.equal(second.ok, true);
+  assert.deepEqual(JSON.parse(await fs.readFile(f.plan.configPath, 'utf8')), customized);
   assert.ok(f.calls.some(call => call.includes('stop')));
   assert.equal(await fs.readFile(path.join(second.backup, 'native-bridge.json'), 'utf8'), config);
 });

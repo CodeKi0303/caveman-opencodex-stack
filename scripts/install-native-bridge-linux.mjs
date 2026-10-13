@@ -139,8 +139,7 @@ export async function installBridge(plan, dependencies = {}) {
   await fs.writeFile(path.join(backup, 'service-state.json'), JSON.stringify(previousState, null, 2) + '\n', {mode: 0o600});
   const unit = renderUnit(plan);
   const priorConfig=before.get(plan.configPath)?JSON.parse(before.get(plan.configPath)):{};
-  const preserved=Object.fromEntries(['compression','management','controlPort'].filter(k=>k in priorConfig).map(k=>[k,priorConfig[k]]));
-  const config = JSON.stringify({...preserved,upstreamUrl: plan.upstreamUrl, keyFile: plan.keyFile, port: plan.port}, null, 2) + '\n';
+  const config = JSON.stringify({...priorConfig,upstreamUrl: plan.upstreamUrl, keyFile: plan.keyFile, port: plan.port}, null, 2) + '\n';
   let changed = false, enableAttempted = false, startAttempted = false;
   try {
     if (owned) await ctl('stop', unitName);
