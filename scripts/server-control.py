@@ -49,6 +49,19 @@ def execute(payload):
             "import fs from 'node:fs';console.log(JSON.stringify(Object.fromEntries(['@caveman-ai/cli','@bitkyc08/opencodex'].map(n=>[n,JSON.parse(fs.readFileSync('/app/node_modules/'+n+'/package.json')).version]))))",
             capture_output=True,text=True)
         return json.loads(running.stdout)
+    def runtime_manifests():
+        # Git pins can lag behind a --latest release. Start from the manifests
+        # actually deployed so updating one product cannot downgrade the others.
+        running=stack.pod('exec',stack.name(config),'node','--input-type=module','-e',
+            "import fs from 'node:fs';console.log(JSON.stringify(Object.fromEntries(['package.json','package-lock.json'].map(n=>[n,fs.readFileSync('/app/'+n,'utf8')]))))",
+            capture_output=True,text=True)
+        files=json.loads(running.stdout)
+        if not isinstance(files,dict) or set(files)!= {'package.json','package-lock.json'} or any(not isinstance(value,str) for value in files.values()):
+            raise ValueError('RUNTIME_MANIFEST_INVALID')
+        current=json.loads(files['package.json']);locked=json.loads(files['package-lock.json'])
+        if not isinstance(current.get('dependencies'),dict) or not isinstance(locked.get('packages'),dict):
+            raise ValueError('RUNTIME_MANIFEST_INVALID')
+        return files,current
     if payload['action']=='check':
         versions={}
         installed=installed_versions()
@@ -76,34 +89,46 @@ def execute(payload):
                 stack.catalog(config)
                 return {'ok':True,'message':'서버 모델 카탈로그를 갱신했습니다. 로컬 동기화를 실행하세요.','jobId':job_id}
             name=PACKAGES[payload['component']];version=payload['version']
-            if package['dependencies'][name]==version and installed_versions().get(name)==version:
+            if installed_versions().get(name)==version:
                 return {'ok':True,'unchanged':True,'message':'이미 해당 버전으로 설정되어 있습니다.','jobId':job_id}
             if shutil.disk_usage(repo).free<4*1024**3:raise ValueError('INSUFFICIENT_DISK')
-            original={p:(repo/p).read_bytes() for p in ['package.json','package-lock.json']}
+            original,current=runtime_manifests()
+            if name not in current['dependencies']:raise ValueError('RUNTIME_MANIFEST_INVALID')
             backup=repo/'backups'/('control-manifests-'+job_id);backup.mkdir(mode=0o700,parents=True)
-            for p,data in original.items():(backup/p).write_bytes(data)
-            changed=False
+            for p,data in original.items():(backup/p).write_text(data)
+            release=repo/'data/releases'/('control-'+job_id);release.mkdir(mode=0o700,parents=True)
+            metadata={'status':'resolving','component':payload['component'],'version':version}
+            def record():(release/'release.json').write_text(json.dumps(metadata,indent=2)+'\n')
+            record()
             try:
                 with tempfile.TemporaryDirectory(prefix='control-lock-',dir=repo/'data') as temporary:
-                    stage=Path(temporary)
-                    for p,data in original.items():(stage/p).write_bytes(data)
-                    staged=json.loads(original['package.json']);staged['dependencies'][name]=version
+                    stage=Path(temporary)/'source';stack.stage_source(stage)
+                    for p,data in original.items():(stage/p).write_text(data)
+                    staged=current;staged['dependencies'][name]=version
                     (stage/'package.json').write_text(json.dumps(staged,indent=2)+'\n')
                     extra=[];ca=stack.bundle_ca()
                     if ca:extra=['--volume',str(ca)+':/tmp/company-ca.pem:ro,z','--env','NODE_EXTRA_CA_CERTS=/tmp/company-ca.pem']
-                    stack.pod('run','--rm','--network',config.get('BUILD_NETWORK','slirp4netns'),
-                        '--volume',str(stage)+':/work:Z','--workdir','/work',*stack.runtime_env(config),*extra,
-                        '--entrypoint','npm',stack.image_id(config),'install','--package-lock-only','--ignore-scripts','--no-audit','--no-fund')
+                    container='caveman-control-resolver-'+job_id
+                    try:
+                        stack.pod('run','--rm','--name',container,'--label','io.caveman-stack.resolver='+job_id,
+                            '--network',config.get('BUILD_NETWORK','slirp4netns'),
+                            '--volume',str(stage)+':/work:Z','--workdir','/work',*stack.runtime_env(config),*extra,
+                            '--entrypoint','npm',stack.image_id(config),'install','--package-lock-only','--ignore-scripts','--no-audit','--no-fund',
+                            '--fetch-retries=1','--fetch-timeout=15000',timeout=300)
+                    finally:
+                        stack.cleanup_resolver(container,job_id)
                     parsed=json.loads((stage/'package-lock.json').read_text())
-                    if parsed['packages']['node_modules/'+name]['version']!=version:raise ValueError('LOCK_VERSION_MISMATCH')
-                    changed=True
-                    for p in original:shutil.copy2(stage/p,repo/p)
-                stack.update(config)
+                    if (parsed['packages']['node_modules/'+name]['version']!=version or
+                            parsed['packages'].get('',{}).get('dependencies')!=staged['dependencies']):
+                        raise ValueError('LOCK_VERSION_MISMATCH')
+                    for p in original:shutil.copy2(stage/p,release/p)
+                    metadata.update(status='validating',dependencies=staged['dependencies']);record()
+                    stack.update(config,context=stage)
+                metadata.update(status='applied',image=stack.image_id(config));record()
                 return {'ok':True,'component':payload['component'],'version':version,'jobId':job_id,
                     'message':'후보 컨테이너 검사와 백업을 거쳐 적용했습니다. 로컬 모델 목록을 동기화하세요.'}
             except BaseException:
-                if changed:
-                    for p,data in original.items():(repo/p).write_bytes(data)
+                metadata['status']='failed';record()
                 raise
 
 def main():

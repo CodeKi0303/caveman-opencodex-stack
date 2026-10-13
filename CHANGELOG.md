@@ -1,5 +1,13 @@
 # 변경 기록
 
+## 미출시 — 업데이트 종료 오류 수정 및 최신 버전 배포
+
+- `stack git-update`: 깨끗한 추적 브랜치를 fast-forward한 뒤 최신 안정 Caveman·OpenCodex·컨테이너 Codex 버전을 조회하고 후보 검증·백업 후 적용.
+- `stack update --latest`: Git pull 없이 같은 최신 버전 배포. 원본 manifest는 보존하고 실제 버전/lockfile/적용 결과는 비공개 `data/releases`에 기록.
+- Podman 호출에서 일회성 systemd 작업의 실행 환경을 분리해 업데이트 작업 종료 시 conmon과 운영 컨테이너가 함께 종료되는 문제 수정.
+- 감독 프로세스의 종료 오류 처리기를 유지해 반복 `kill EACCES` 미처리 예외를 방지하고 실제 종료 신호·컴포넌트 오류를 구분해 기록.
+- 제어 페이지의 개별 업데이트도 실행 중인 manifest를 기준으로 선택한 제품만 변경하여 다른 제품의 의도하지 않은 다운그레이드를 방지.
+
 ## 미출시 — 로컬 제어 페이지
 
 - loopback 전용 관리 페이지: Pod 주소·키 검사 및 저장, 요청별 Caveman 압축 선택, 카탈로그 수동 동기화와 연결 진단.

@@ -35,6 +35,50 @@ systemctl --user enable --now caveman-stack.service
 이 oneshot unit은 부팅 시작/정지를 제공합니다. 컨테이너 crash의 자동 복구·알림은 포함하지 않습니다.
 운영 감시가 필요한 조직은 자체 Podman Quadlet/모니터링 기준에 통합하세요.
 
+## Git과 최신 안정 버전 업데이트
+
+```bash
+./stack git-update
+```
+
+작업 트리와 추적 브랜치를 확인하고 `git pull --ff-only` 후 새 소스의 업데이트 명령을 실행합니다.
+미커밋 변경이 있으면 멈추며 자동 stash/reset을 하지 않습니다. 기존 운영 서버에 직접 수정한 파일이 있다면
+먼저 백업·비교하고 Git에 통합하세요. `git pull`만으로 실행 서비스가 바뀌지는 않습니다.
+이미 소스를 가져왔거나 의도한 미커밋 변경을 시험할 때는 `./stack update --latest`를 사용합니다.
+
+최신 조회 대상은 `@caveman-ai/cli`, `@bitkyc08/opencodex`, 컨테이너의 `@openai/codex`입니다.
+npm `latest`가 정확한 정식 버전일 때만 선택하며 프리릴리스는 거부합니다. SDK/TOML/Node 이미지는
+저장소 고정 버전을 유지합니다. 임시 빌드 컨텍스트에 exact 버전과 lockfile을 생성하고 후보 검증 후 배포합니다.
+실제 선택 버전, 소스 커밋, 변경 여부, 결과와 manifest는 `data/releases/<실행 ID>/`에 보관합니다.
+원본 `package.json`은 유지되므로 실행 버전 확인에는 컨테이너 또는 release 기록을 사용합니다.
+기존 `./stack update`는 현재 manifest 버전 그대로 배포하는 명령입니다.
+
+최신 안정 버전도 호환성을 보장하지 않습니다. 상태/카탈로그 검사 후 실제 사용 모델·도구를 확인하고
+문제가 있으면 백업으로 롤백합니다. 이 명령은 호스트의 Codex Desktop/CLI를 업그레이드하지 않으며
+클라이언트 카탈로그 동기화는 여전히 수동입니다. 정기 업데이트 작업은 등록하지 않습니다.
+
+### systemd 일회성 작업에서 컨테이너가 종료되는 문제
+
+일부 Podman 버전은 `INVOCATION_ID`가 있는 systemd 작업에서 실행하면 conmon을 호출한 작업의
+cgroup에 남깁니다. 업데이트 스크립트가 성공해도 작업 종료 시 conmon에 종료 신호가 전달될 수 있습니다.
+이 프로젝트의 Podman 실행 래퍼는 `INVOCATION_ID`, `SYSTEMD_EXEC_PID`, `NOTIFY_SOCKET`을 자식 환경에서
+제거합니다. systemd 작업에서 detached 컨테이너를 시작할 때는 별도 transient scope를 만들어
+slirp4netns/rootlessport 같은 네트워크 보조 프로세스도 업데이트 작업과 분리합니다.
+rootless 실행은 사용자 systemd manager를 사용하며, scope 생성에 실패하면 우회하지 않고 중단합니다.
+AppArmor나 capability 제한을 해제하지 않습니다.
+관련 upstream 보고: https://github.com/podman-container-tools/podman/issues/29582
+
+2026-10-13 조사에서는 실제 모델 응답 성공 후 일회성 업데이트 작업 완료와 동시에 종료가 시작됐습니다.
+격리 재현에서 기존 conmon은 업데이트 unit cgroup에 남았습니다. 환경 변수 제거만으로는 컨테이너가
+살아도 포트 전달 프로세스가 종료되어 접속이 끊길 수 있었습니다. 별도 scope 적용 후에는 작업 완료
+뒤에도 컨테이너와 HTTP 연결이 유지됐습니다. Caveman/OpenCodex 자체의 시작 실패와 구분합니다.
+
+호스트 AppArmor의 중첩 crun 프로파일 간 신호 거부도 발견됐습니다. 기존 감독 코드는 이를 시작 실패로
+잘못 표시한 뒤 반복 `kill EACCES`를 처리하지 못했습니다. 이제 시작/종료 오류와 종료 이유를 별도로 기록합니다.
+이 방어 코드는 호스트 정책 자체를 변경하지 않으므로 신호 거부가 계속되면 호스트 Podman/crun/AppArmor
+정책을 별도로 확인합니다. `systemctl is-active`가 oneshot의 `active`를 반환해도 실제 컨테이너 생존을
+보장하지 않습니다. 업데이트 작업이 끝난 뒤 `podman ps`와 실제 API를 다시 확인하세요.
+
 ## Remote와 기본 openai 연결 운영
 
 Remote를 사용하는 클라이언트는 [README의 브리지 설치 절차](../README.md#windows에서-기본-openai-provider-사용)를 따릅니다.

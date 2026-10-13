@@ -280,9 +280,10 @@ OpenCodex에 외부 제공자를 추가할 때는 제공자의 URL·API 형식(�
 ## 4. 업데이트·백업·복구
 
 ```bash
-./stack backup                 # 잠시 중지 → 일관된 DB 복사 → 재기동
-# package.json의 버전을 검토해서 변경한 다음
-./stack lock                   # 잠금 파일 갱신 (호스트 npm 불필요)
+./stack git-update             # Git fast-forward + 최신 안정 버전 조회 + 검증 후 배포
+# Git 코드는 이미 가져왔거나 로컬 변경을 보존해야 하는 경우
+./stack update --latest        # 현재 소스로 최신 안정 버전 조회 + 검증 후 배포
+# 지정한 package.json/package-lock.json 버전 그대로 배포하려면
 ./stack update
 ```
 
@@ -290,7 +291,13 @@ OpenCodex에 외부 제공자를 추가할 때는 제공자의 URL·API 형식(�
 → 운영 교체 → 준비 상태·카탈로그 확인 순서로 실행합니다. 운영 교체 단계가 실패하면 이전 이미지와 DB로 복원합니다.
 빌드/후보 검증 실패 시 이전 서비스가 유지됩니다. 실제 모델 API 테스트는 계정 비용·인증이 필요하므로 자동 상태 검사와 구분합니다.
 업데이트에는 짧은 중단이 있습니다. 사용 중인 Codex/MCP를 닫고 유지보수 시간에 실행하세요.
-무인 `latest` 자동 교체 대신 검토 가능한 버전·잠금 파일 변경을 Git으로 배포합니다.
+`git-update`는 추적 브랜치가 있는 깨끗한 저장소에서만 `git pull --ff-only`를 실행합니다.
+단순 `git pull`은 서비스나 의존성을 변경하지 않습니다. 최신 조회 대상은 Caveman CLI·OpenCodex·컨테이너의 Codex CLI이며,
+npm의 `latest` 태그가 정식 버전일 때만 적용합니다. SDK·TOML·Node 기반 이미지는 저장소에 고정된 버전을 유지합니다.
+조회·빌드·검증 실패 시 성공으로 처리하거나 다른 버전으로 조용히 대체하지 않습니다.
+정확한 버전과 lockfile은 `data/releases/<실행 ID>/`에 보관하고 Git의 package 파일은 변경하지 않습니다.
+예약이나 주기적 갱신은 등록하지 않습니다. 로컬 PC의 Codex Desktop/CLI 및 모델 목록 동기화는 별도입니다.
+자세한 상태 확인과 systemd 실행 주의점은 [운영 가이드](docs/OPERATIONS.md#git과-최신-안정-버전-업데이트)를 참고하세요.
 
 ```bash
 ./stack rollback backups/20261002-120000
