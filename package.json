@@ -6,8 +6,7 @@
   "license": "MIT",
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "sync": "node scripts/manual-sync.mjs",
-    "manage": "node scripts/manage-launch.mjs"
+    "sync": "node scripts/manual-sync.mjs"
   },
   "dependencies": {
     "@bitkyc08/opencodex": "2.75.0",

@@ -27,15 +27,7 @@ export function remoteCommand(settings,action,args={}){
   let output='';child.stdout.on('data',chunk=>{output+=chunk;if(output.length>1024*1024)child.kill();});child.stderr.resume();
   const timer=setTimeout(()=>{child.kill();reject(Error('SSH_TIMEOUT'));},40*60*1000);
   child.on('error',()=>{clearTimeout(timer);reject(Error('SSH_UNAVAILABLE'));});
-  child.on('close',code=>{clearTimeout(timer);try{
-   const result=JSON.parse(output);
-   if(code!==0||!result.ok){
-    const error=Error(typeof result.error==='string'&&/^[A-Z_]+$/.test(result.error)?result.error:'SERVER_OPERATION_FAILED');
-    if(typeof result.jobId==='string'&&/^[a-f0-9]{32}$/.test(result.jobId))error.jobId=result.jobId;
-    reject(error);return;
-   }
-   resolve(result);
-  }catch{reject(Error('SERVER_OPERATION_FAILED'));}});
+  child.on('close',code=>{clearTimeout(timer);try{const result=JSON.parse(output);if(code!==0||!result.ok)throw Error(result.error||'SERVER_OPERATION_FAILED');resolve(result);}catch(error){reject(Error(/^[A-Z_]+$/.test(error.message)?error.message:'SERVER_OPERATION_FAILED'));}});
   child.stdin.on('error',()=>{});child.stdin.end(JSON.stringify({repo:m.repo,action,...args}));
  });
 }
@@ -81,7 +73,7 @@ export function createControlPanel({configPath,fetchFn=fetch,client=runClient,re
   const c=settings();
   (async()=>{
    if(action==='sync'||action==='doctor'){
-    const result=await client([action==='sync'?'sync':'doctor','--url',c.upstreamUrl,'--key-file',c.keyFile,'--codex-home',home,...(action==='doctor'?['--provider','openai','--bridge-url',`http://127.0.0.1:${c.port}/v1`]:[])]);
+    const result=await client([action==='sync'?'sync':'doctor','--url',c.upstreamUrl,'--key-file',c.keyFile,'--codex-home',home]);
     job.result=action==='sync'?{ok:result.ok,changed:result.catalogChanged,restartCodex:result.restartCodex,warnings:result.warnings}:result;
     if(!result.ok)throw Error('DOCTOR_FAILED');
    }else{

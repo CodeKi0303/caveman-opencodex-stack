@@ -1,13 +1,9 @@
 # 로컬 제어 페이지
 
-Windows/Linux의 기본 `http://127.0.0.1:18786/`에서 현재 환경의 연결을 관리합니다.
+Windows의 `http://127.0.0.1:18786/`에서 현재 PC의 연결을 관리합니다.
 바탕화면의 `Caveman Control` 바로가기로도 열 수 있습니다.
 
 ## 설치
-
-Windows에서 `Manage.cmd`, Linux/WSL에서 `./Manage.sh --with-web-ui`를 실행하면 터미널에서 주소·키를
-입력하고 브리지와 제어 페이지를 함께 설치할 수 있습니다. [관리 메뉴 안내](MANAGER.md)를 참고하세요.
-아래는 개별 설치 명령입니다.
 
 먼저 이 버전의 게이트웨이를 서버에 배포해야 압축 선택 기능을 사용할 수 있습니다.
 서버에서 기존 `./stack update` 절차로 배포하고 로컬 저장소에서 `npm ci --ignore-scripts`를 실행합니다.
@@ -31,14 +27,7 @@ Linux/WSL에서도 저장소 의존성을 설치한 후 관리 페이지를 실�
 node scripts/control-panel.mjs --config "$HOME/.codex/caveman-stack/native-bridge.json"
 ```
 
-Linux/WSL 사용자 서비스 설치는 아래 명령을 사용합니다. root 시스템 서비스는 `--system`을 추가합니다.
-
-```bash
-node scripts/install-control-panel-linux.mjs --codex-home "$HOME/.codex"
-```
-
-`caveman-control-panel.service`가 시작되고 로그인 시 자동 시작됩니다. WSL에서 새 관리 메뉴로
-설정하면 기본 관리 포트는 `18785`입니다. 실제 주소는 설치 결과에 표시됩니다.
+Linux 관리 페이지의 자동 시작은 별도 사용자 서비스로 등록해야 합니다.
 Linux 브리지 설치기는 코드 복사본을 사용하므로 Git 업데이트 후 설치기를 다시 실행해야 합니다.
 
 ## 연결과 압축
