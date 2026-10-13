@@ -9,29 +9,38 @@ const directory=path.dirname(fileURLToPath(import.meta.url));
 const read=file=>JSON.parse(fs.readFileSync(file,'utf8'));
 function atomic(file,value){const tmp=file+'.tmp-'+randomUUID();try{fs.writeFileSync(tmp,JSON.stringify(value,null,2)+'\n',{mode:0o600,flag:'wx'});fs.renameSync(tmp,file);}finally{if(fs.existsSync(tmp))fs.unlinkSync(tmp);}}
 function validUrl(value){const u=new URL(value);if(!['http:','https:'].includes(u.protocol)||u.username||u.password||u.search||u.hash||!['/v1','/v1/'].includes(u.pathname))throw Error('INVALID_URL');u.pathname='/v1';return u.href;}
-function validateManagement(value){
+export function validateManagement(value,{platform=process.platform}={}){
  if(value===null)return null;
+ if(value?.mode==='local'){
+  if(platform!=='linux'||!path.isAbsolute(value.repo??''))throw Error('INVALID_LOCAL_MANAGEMENT');
+  try{if(fs.realpathSync(value.repo)!==fs.realpathSync(path.dirname(directory)))throw Error();}catch{throw Error('INVALID_LOCAL_MANAGEMENT');}
+  return {mode:'local',repo:fs.realpathSync(value.repo)};
+ }
+ if(value?.mode!==undefined&&value.mode!=='ssh')throw Error('INVALID_SSH_SETTINGS');
  if(!value||typeof value.host!=='string'||!/^([a-z_][a-z0-9_-]*@)?[a-z0-9.-]+$/i.test(value.host)||value.host.startsWith('-')||
    !path.isAbsolute(value.keyFile??'')||typeof value.repo!=='string'||!/^\/[a-zA-Z0-9_./-]+$/.test(value.repo)||value.repo.split('/').includes('..'))throw Error('INVALID_SSH_SETTINGS');
  if(!fs.statSync(value.keyFile).isFile())throw Error('SSH_KEY_UNREADABLE');
  return {host:value.host,keyFile:value.keyFile,repo:value.repo};
 }
-export function remoteCommand(settings,action,args={}){
- const m=validateManagement(settings.management);
+export function remoteCommand(settings,action,args={}, {platform=process.platform,spawnFn=spawn,timeoutMs=40*60*1000}={}){
+ if(!['check','catalog','update'].includes(action)||!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).some(name=>action!=='update'||!['component','version'].includes(name)))throw Error('INVALID_SERVER_ACTION');
+ if(action==='update'&&(!['caveman','opencodex'].includes(args.component)||!/^\d+\.\d+\.\d+$/.test(args.version??'')))throw Error('INVALID_VERSION');
+ const m=validateManagement(settings.management,{platform});
  if(!m)throw Error('SSH_NOT_CONFIGURED');
- if(m.host.split('@').at(-1).toLowerCase()!==new URL(settings.upstreamUrl).hostname.toLowerCase())throw Error('SSH_TARGET_MISMATCH');
- const source=fs.readFileSync(path.join(directory,'server-control.py')).toString('base64');
+ const local=m.mode==='local';
+ if(!local&&m.host.split('@').at(-1).toLowerCase()!==new URL(settings.upstreamUrl).hostname.toLowerCase())throw Error('SSH_TARGET_MISMATCH');
+ const source=local?null:fs.readFileSync(path.join(directory,'server-control.py')).toString('base64');
  return new Promise((resolve,reject)=>{
-  const child=spawn('ssh',['-T','-i',m.keyFile,'-o','IdentitiesOnly=yes','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=10',m.host,
+  const child=spawnFn(local?'python3':'ssh',local?[path.join(directory,'server-control.py')]:['-T','-i',m.keyFile,'-o','IdentitiesOnly=yes','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=10',m.host,
    `python3 -c "import base64;exec(base64.b64decode('${source}'))"`],{windowsHide:true,stdio:['pipe','pipe','pipe']});
   let output='';child.stdout.on('data',chunk=>{output+=chunk;if(output.length>1024*1024)child.kill();});child.stderr.resume();
-  const timer=setTimeout(()=>{child.kill();reject(Error('SSH_TIMEOUT'));},40*60*1000);
-  child.on('error',()=>{clearTimeout(timer);reject(Error('SSH_UNAVAILABLE'));});
-  child.on('close',code=>{clearTimeout(timer);try{const result=JSON.parse(output);if(code!==0||!result.ok)throw Error(result.error||'SERVER_OPERATION_FAILED');resolve(result);}catch(error){reject(Error(/^[A-Z_]+$/.test(error.message)?error.message:'SERVER_OPERATION_FAILED'));}});
+  const timer=setTimeout(()=>{child.kill();reject(Error(local?'LOCAL_MANAGEMENT_TIMEOUT':'SSH_TIMEOUT'));},timeoutMs);
+  child.on('error',()=>{clearTimeout(timer);reject(Error(local?'LOCAL_MANAGEMENT_UNAVAILABLE':'SSH_UNAVAILABLE'));});
+  child.on('close',code=>{clearTimeout(timer);try{const result=JSON.parse(output);if(code!==0||result?.ok!==true)throw Error(result?.error||'SERVER_OPERATION_FAILED');resolve(result);}catch(error){reject(Error(/^[A-Z_]+$/.test(error.message)?error.message:'SERVER_OPERATION_FAILED'));}});
   child.stdin.on('error',()=>{});child.stdin.end(JSON.stringify({repo:m.repo,action,...args}));
  });
 }
-export function createControlPanel({configPath,fetchFn=fetch,client=runClient,remote=remoteCommand}={}){
+export function createControlPanel({configPath,fetchFn=fetch,client=runClient,remote=remoteCommand,platform=process.platform}={}){
  configPath=path.resolve(configPath);
  const home=path.dirname(path.dirname(configPath));
  const csrf=randomBytes(32).toString('hex');
@@ -51,7 +60,15 @@ export function createControlPanel({configPath,fetchFn=fetch,client=runClient,re
   const before=settings(),next={...before};
   next.upstreamUrl=validUrl(body.upstreamUrl);
   if(typeof body.compression!=='boolean')throw Error('INVALID_COMPRESSION');next.compression=body.compression;
-  if(body.management!==undefined)next.management=validateManagement(body.management);
+  if(before.management?.mode==='local'){
+   const local=validateManagement(before.management,{platform});
+   if(next.upstreamUrl!==validUrl(before.upstreamUrl))throw Error('LOCAL_MANAGEMENT_LOCKED');
+   if(body.management!==undefined&&(body.management?.mode!=='local'||body.management?.repo!==before.management.repo))throw Error('LOCAL_MANAGEMENT_LOCKED');
+   next.management=local;
+  }else{
+   if(body.management?.mode==='local')throw Error('LOCAL_MANAGEMENT_LOCKED');
+   if(body.management!==undefined)next.management=validateManagement(body.management,{platform});
+  }
   if(body.key!==undefined&&body.key!==''&&(typeof body.key!=='string'||body.key.length<32||body.key.length>4096||/[\r\n]/.test(body.key)))throw Error('INVALID_KEY');
   let newKey;
   try{
@@ -73,7 +90,7 @@ export function createControlPanel({configPath,fetchFn=fetch,client=runClient,re
   const c=settings();
   (async()=>{
    if(action==='sync'||action==='doctor'){
-    const result=await client([action==='sync'?'sync':'doctor','--url',c.upstreamUrl,'--key-file',c.keyFile,'--codex-home',home]);
+    const result=await client([action==='sync'?'sync':'doctor','--url',c.upstreamUrl,'--key-file',c.keyFile,'--codex-home',home,...(action==='doctor'?['--provider','openai','--bridge-url',`http://127.0.0.1:${c.port}/v1`]:[])]);
     job.result=action==='sync'?{ok:result.ok,changed:result.catalogChanged,restartCodex:result.restartCodex,warnings:result.warnings}:result;
     if(!result.ok)throw Error('DOCTOR_FAILED');
    }else{
