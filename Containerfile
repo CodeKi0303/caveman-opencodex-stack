@@ -1,4 +1,4 @@
-FROM docker.io/library/node:24.14.1-bookworm-slim
+FROM docker.io/library/node:24.21.0-bookworm-slim
 WORKDIR /app
 COPY package.json package-lock.json ./
 # A company CA is a build secret, never copied into the image.

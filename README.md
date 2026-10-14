@@ -28,13 +28,14 @@ OpenCodex → 선택한 제공자의 모델 API (인터넷 / 사내 서버 / 호
 
 두 프로젝트를 fork하거나 소스를 복사해 합치지 않습니다. 이 저장소는 연결 코드·운영 명령만 관리하며,
 빌드할 때 `package-lock.json`으로 고정된 upstream 패키지를 설치합니다.
-현재 고정 버전은 OpenCodex **2.75.0**, Caveman CLI **1.3.4**, Codex CLI **0.160.0**입니다.
-Caveman companion 바이너리는 해당 CLI의 서명 검증 설치기가 선택합니다(이 버전: `bin-v1.1.7`).
+현재 고정 버전은 Node.js **24.21.0**, Bun **1.4.3**, OpenCodex **2.84.0**,
+Caveman CLI **4.0.1**, Codex CLI **0.162.1**, MCP SDK **1.32.1**입니다.
+Caveman companion 바이너리는 해당 CLI의 서명 검증 설치기가 선택합니다(이 버전: `bin-v4.0.1`).
+직접 실행하는 Bun은 별도로 고정하며, 나머지 간접 의존성은 upstream의 호환 범위 안에서 갱신합니다.
 이 서버의 기존 네이티브 설치와 데이터는 사용하거나 변경하지 않습니다.
 
-배포 라이선스는 두 프로젝트가 다릅니다. OpenCodex는 MIT지만, 고정한 Caveman release의
-proxy/MCP 엔진은 **BSL-1.1**입니다. 해당 Additional Use Grant는 자체 트래픽의 사내 self-hosted
-운영을 허용하고, 제3자에게 hosted/managed/embedded 서비스로 제공하는 경우 별도 상업 라이선스를 요구합니다.
+OpenCodex는 MIT이며, 고정한 Caveman release의 CLI와 proxy/MCP 엔진은 **Apache-2.0**입니다.
+Caveman 3.0.0 이전 release는 당시 라이선스가 그대로 적용됩니다.
 [정확한 release 고지](THIRD_PARTY.md)를 함께 확인하세요.
 
 ## 1. 시작
@@ -327,7 +328,7 @@ OpenCodex에 외부 제공자를 추가할 때는 제공자의 URL·API 형식(�
 업데이트에는 짧은 중단이 있습니다. 사용 중인 Codex/MCP를 닫고 유지보수 시간에 실행하세요.
 `git-update`는 추적 브랜치가 있는 깨끗한 저장소에서만 `git pull --ff-only`를 실행합니다.
 단순 `git pull`은 서비스나 의존성을 변경하지 않습니다. 최신 조회 대상은 Caveman CLI·OpenCodex·컨테이너의 Codex CLI이며,
-npm의 `latest` 태그가 정식 버전일 때만 적용합니다. SDK·TOML·Node 기반 이미지는 저장소에 고정된 버전을 유지합니다.
+npm의 `latest` 태그가 정식 버전일 때만 적용합니다. SDK·TOML·Bun·Node 기반 이미지는 저장소에 고정된 버전을 유지합니다.
 조회·빌드·검증 실패 시 성공으로 처리하거나 다른 버전으로 조용히 대체하지 않습니다.
 정확한 버전과 lockfile은 `data/releases/<실행 ID>/`에 보관하고 Git의 package 파일은 변경하지 않습니다.
 예약이나 주기적 갱신은 등록하지 않습니다. 로컬 PC의 Codex Desktop/CLI 및 모델 목록 동기화는 별도입니다.

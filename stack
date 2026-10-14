@@ -333,7 +333,7 @@ def main():
             ca=bundle_ca();extra=[]
             if ca:extra=['--volume',str(ca)+':/tmp/company-ca.pem:ro,z','--env','NODE_EXTRA_CA_CERTS=/tmp/company-ca.pem']
             pod('run','--rm','--network',c.get('BUILD_NETWORK','slirp4netns'),'--volume',str(ROOT)+':/work:Z','--workdir','/work',*runtime_env(c),*extra,
-                'docker.io/library/node:24.14.1-bookworm-slim','npm','install','--package-lock-only','--ignore-scripts','--no-audit','--no-fund')
+                'docker.io/library/node:24.21.0-bookworm-slim','npm','install','--package-lock-only','--ignore-scripts','--no-audit','--no-fund')
 
 if __name__=='__main__':
     try:main()

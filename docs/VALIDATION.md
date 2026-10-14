@@ -1,5 +1,15 @@
 # 검증 기록
 
+## 회사 CA fallback 및 의존성 갱신 (2026-10-14)
+
+- Node `24.21.0`으로 전체 Node 테스트 115개 통과, Windows 전용 2개 제외. Python 테스트 49개 및 문법 검사 통과.
+- Docker `28.4.0`에서 `node:24.21.0-bookworm-slim` 기반 전체 이미지 빌드 성공. 회사 CA는 build secret으로만 전달했고 Caveman `bin-v4.0.1` 바이너리 checksum 검증 설치 성공.
+- 시스템 CA 파일이 없는 최종 이미지에서 테스트 회사 CA를 `/certs`에 마운트해 스택 기동·준비 상태 확인. Node 내장 루트 121개와 회사 CA가 생성 번들에 포함되고 자식 프로세스의 CA 환경변수 네 가지가 해당 번들을 가리킴을 확인.
+- 동일 컨테이너 안의 테스트 HTTPS 서버에 대해 Node `24.21.0`과 Bun `1.4.3` 검증 성공, 회사 CA를 전달하지 않은 클라이언트는 연결 거부. 별도 회귀 테스트에서 시스템 CA 유지·누락/빈 번들 fallback·`server.crt` 제외·인증서 읽기 오류 전파·`SSL_CERT_FILE` 검증 확인.
+- 실제 Caveman `4.0.1` 프록시로 계정·세션·하위 작업 헤더 전달 통과. 합성 JSON 68,071바이트를 압축한 뒤 실제 MCP 및 저장소 HTTP MCP 브리지 경유 원문 복구 일치.
+- Bun `1.4.3`에서 OpenCodex `2.84.0` 직접 import와 프로젝트 기본 설정 schema 검증 통과. `npm ls --all --omit=dev` 정상, `npm audit --omit=dev` 취약점 0개.
+- 이 기록은 Linux amd64의 Docker 및 테스트용 사설 CA 검증이다. 실제 회사 프록시, Podman/SELinux, ARM64, Windows 실행 및 인증된 모델 추론은 이번 로컬 검증에 포함하지 않았다.
+
 ## 0.3.0 수동 동기화 전환 (2026-10-04)
 
 - Windows 전체 Node 테스트 45개 통과·2개 제외, WSL 변경 기능 테스트 19개 및 Python 수명 주기 테스트 3개 통과. GitHub Windows/Linux CI 성공.

@@ -25,7 +25,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-NODE_VERSION = "24.14.1"
+NODE_VERSION = "24.21.0"
 MIN_NODE = (22, 13, 0)
 OWNER = "caveman-opencodex-stack/bootstrap-v1"
 MAX_ARCHIVE = 128 * 1024 * 1024

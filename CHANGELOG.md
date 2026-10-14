@@ -1,5 +1,13 @@
 # 변경 기록
 
+## 미출시 — Node 24.21.0 및 의존성 갱신
+
+- 컨테이너 이미지·lockfile 생성용 이미지·Linux 설치용 Node를 `24.21.0`으로 통일.
+- OpenCodex `2.84.0`, Caveman CLI/바이너리 `4.0.1`, Codex CLI `0.162.1`, MCP SDK `1.32.1`, Bun `1.4.3`으로 갱신. Bun을 직접 실행하는 런타임 의존성으로 고정하고 OpenCodex도 같은 버전을 사용.
+- TOML은 게시된 최고 버전 `3.0.0` 유지. 전이 의존성은 upstream 호환 범위 안에서 lockfile 갱신.
+- GitHub Actions checkout `v7.0.1`, setup-node `v7.1.0` 및 CI Node `24.21.0` 고정.
+- Caveman `bin-v4.0.1`의 Apache-2.0 및 제3자 라이선스 고지를 보존하고 현재 배포 문서 갱신.
+
 ## 미출시 — 회사 CA와 내장 루트 인증서
 
 - `certs/*.crt`, `certs/*.pem`이 있을 때 시스템 CA 번들이 없거나 비어 있으면 Node.js 내장 루트 인증서와 회사 CA를 합쳐 런타임 HTTPS 검증에 사용.

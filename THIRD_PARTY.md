@@ -11,21 +11,28 @@ an image; preserve that release's own notices as well.
 
 | Component | Pinned source | License information |
 |---|---|---|
-| OpenCodex | npm `@bitkyc08/opencodex@2.75.0`, https://github.com/lidge-jun/opencodex | MIT; notice preserved in `licenses/OpenCodex-MIT.txt` |
-| Caveman CLI | npm `@caveman-ai/cli@1.3.4`, https://github.com/JuliusBrussee/caveman | package metadata declares MIT |
-| Caveman companion binaries | CLI's signed binary release, `bin-v1.1.7` | BSL-1.1 with Additional Use Grant; see `licenses/Caveman-proxy-LICENSE` and `licenses/Caveman-LICENSING.md` |
-| Codex CLI | npm `@openai/codex@0.160.0`, https://github.com/openai/codex | upstream Apache-2.0; preserve packaged notices |
-| MCP TypeScript SDK | npm `@modelcontextprotocol/sdk@1.30.0` | MIT; license retained in installed package |
+| OpenCodex | npm `@bitkyc08/opencodex@2.84.0`, https://github.com/lidge-jun/opencodex | MIT; notice preserved in `licenses/OpenCodex-MIT.txt` |
+| Caveman CLI | npm `@caveman-ai/cli@4.0.1`, https://github.com/JuliusBrussee/caveman | Apache-2.0; license and NOTICE retained in installed package |
+| Caveman companion binaries | CLI's signed binary release, `bin-v4.0.1` | Apache-2.0; exact release notices preserved in `licenses/Caveman-bin-v4.0.1/` |
+| Codex CLI | npm `@openai/codex@0.162.1`, https://github.com/openai/codex | upstream Apache-2.0; preserve packaged notices |
+| MCP TypeScript SDK | npm `@modelcontextprotocol/sdk@1.32.1` | MIT; license retained in installed package |
 | TOML parser | npm `@iarna/toml@3.0.0` | ISC; license retained in installed package |
-| Node/Bun/base OS and transitive dependencies | Containerfile + package-lock.json | each component retains its own license |
+| Bun | npm `bun@1.4.3`, also selected for OpenCodex through a scoped override | MIT; preserve runtime third-party notices |
+| Node.js | `node:24.21.0-bookworm-slim` | MIT with upstream third-party notices |
+| Base OS and transitive dependencies | Containerfile + package-lock.json | each component retains its own license |
 
-The pinned Caveman binary release is **not entirely open source**: its CLI/adoption surfaces
-are MIT, but engine-linked proxy/MCP/binaries are BSL-1.1. The release's Additional Use Grant
-permits self-hosted production use for your own first-party traffic, including internal use.
-Offering that functionality to third parties as a hosted, managed, or embedded service requires
-a commercial license from the licensor. The listed Change Date is 2030-06-21, with Apache-2.0
-as Change License. Do not infer this release's terms from a newer `main` branch LICENSE.
-Exact source: https://github.com/JuliusBrussee/caveman/blob/bin-v1.1.7/LICENSING.md
+Caveman 3.0.0 and later license the CLI and engine-linked runtime under Apache-2.0.
+Earlier releases retain the MIT/BSL-1.1 terms they shipped with. The `bin-v4.0.1`
+release's Apache license, retained MIT notice, NOTICE, licensing guide, and native/font
+third-party notices are preserved verbatim in `licenses/Caveman-bin-v4.0.1/`.
+Its `THIRD_PARTY_GO_LICENSES.tar.gz` is preserved as extracted text in that directory's
+`third-party-go/` tree. `Containerfile` includes these notices in the image.
+Exact source: https://github.com/JuliusBrussee/caveman/releases/tag/bin-v4.0.1
+
+Project-managed packages were checked against npm on 2026-10-14. TOML 3.0.0 remains
+the highest published version; its `latest` tag still points to the older 2.2.5.
+Other transitive packages follow the supported ranges and exact pins of their upstream
+parents rather than forcing incompatible major versions.
 
 This source distribution references upstream packages rather than copying their source into Git.
 When distributing built images, preserve installed package licenses and the exact binary release

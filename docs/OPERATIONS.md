@@ -47,7 +47,7 @@ systemctl --user enable --now caveman-stack.service
 이미 소스를 가져왔거나 의도한 미커밋 변경을 시험할 때는 `./stack update --latest`를 사용합니다.
 
 최신 조회 대상은 `@caveman-ai/cli`, `@bitkyc08/opencodex`, 컨테이너의 `@openai/codex`입니다.
-npm `latest`가 정확한 정식 버전일 때만 선택하며 프리릴리스는 거부합니다. SDK/TOML/Node 이미지는
+npm `latest`가 정확한 정식 버전일 때만 선택하며 프리릴리스는 거부합니다. SDK/TOML/Bun/Node 이미지는
 저장소 고정 버전을 유지합니다. 임시 빌드 컨텍스트에 exact 버전과 lockfile을 생성하고 후보 검증 후 배포합니다.
 실제 선택 버전, 소스 커밋, 변경 여부, 결과와 manifest는 `data/releases/<실행 ID>/`에 보관합니다.
 원본 `package.json`은 유지되므로 실행 버전 확인에는 컨테이너 또는 release 기록을 사용합니다.

@@ -24,7 +24,7 @@ cd caveman-podman
 서비스 등록 명령, 전역 Codex 설치는 필요하지 않습니다.
 
 시작 전에 Git과 Python 3.11 이상이 필요합니다. 실행기는 Linux용 Node가 없거나 지원 버전보다 낮으면
-공식 Node.js 24.14.1을 사용자 폴더 `~/.local/share/caveman-client/node-runtime`에 설치할지 묻습니다.
+공식 Node.js 24.21.0을 사용자 폴더 `~/.local/share/caveman-client/node-runtime`에 설치할지 묻습니다.
 다운로드 체크섬을 확인하며 시스템 Node는 변경하지 않습니다. 프로젝트 의존성 준비도 확인 후 수행합니다.
 이미 설치된 Node는 22.13 이상을 사용하며 Windows의 `node.exe`는
 WSL 실행 환경을 대신할 수 없습니다. 서버에 필요한 Podman 4.9.3+, Python 3.11+, slirp4netns와 systemd도

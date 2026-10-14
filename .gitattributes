@@ -1,1 +1,3 @@
 /manage text eol=lf
+# Preserve exact upstream license notices, including their original whitespace.
+/licenses/Caveman-bin-v4.0.1/** whitespace=-blank-at-eol,-blank-at-eof
