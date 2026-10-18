@@ -48,12 +48,44 @@ test('company CA uses all built-in Node roots when the system bundle is absent o
   }
 });
 
-test('without company certificates the existing client trust settings are untouched', t => {
+test('without company certificates a usable system bundle leaves client trust settings untouched', t => {
   const paths = fixture(t);
+  fs.writeFileSync(paths.systemBundle, rootCertificates[0]);
   fs.writeFileSync(path.join(paths.certsDir, 'server.crt'), 'inbound-server-certificate');
   assert.deepEqual(companyCaEnvironment(paths), {});
   fs.rmSync(paths.certsDir, {recursive: true});
   assert.deepEqual(companyCaEnvironment(paths), {});
+  assert.equal(fs.existsSync(paths.bundlePath), false);
+});
+
+test('without company certificates missing or empty system roots still bootstrap native client trust', async t => {
+  for (const empty of [false, true]) {
+    for (const missingCertsDir of [false, true]) {
+      await t.test(`${empty ? 'empty' : 'missing'} system bundle, ${missingCertsDir ? 'missing' : 'present'} company directory`, t => {
+        const paths = fixture(t);
+        if (empty) fs.writeFileSync(paths.systemBundle, '\n  \n');
+        if (missingCertsDir) fs.rmSync(paths.certsDir, {recursive: true});
+        else fs.writeFileSync(path.join(paths.certsDir, 'server.crt'), 'inbound-server-certificate');
+        assert.deepEqual(companyCaEnvironment(paths), {
+          NODE_EXTRA_CA_CERTS: paths.bundlePath,
+          SSL_CERT_FILE: paths.bundlePath,
+          CURL_CA_BUNDLE: paths.bundlePath,
+          REQUESTS_CA_BUNDLE: paths.bundlePath
+        });
+        assert.equal(fs.readFileSync(paths.bundlePath, 'utf8'), rootCertificates.join('\n'));
+      });
+    }
+  }
+});
+
+test('without company certificates unreadable trust inputs still fail instead of being treated as absent', t => {
+  const paths = fixture(t);
+  fs.mkdirSync(paths.systemBundle);
+  assert.throws(() => companyCaEnvironment(paths), {code: 'EISDIR'});
+  fs.rmSync(paths.systemBundle, {recursive: true});
+  fs.rmSync(paths.certsDir, {recursive: true});
+  fs.writeFileSync(paths.certsDir, 'not a directory');
+  assert.throws(() => companyCaEnvironment(paths), {code: 'ENOTDIR'});
   assert.equal(fs.existsSync(paths.bundlePath), false);
 });
 

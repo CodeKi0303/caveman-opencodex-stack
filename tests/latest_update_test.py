@@ -24,7 +24,7 @@ class LatestTests(unittest.TestCase):
         self.dependencies['@iarna/toml']='3.0.0'
         (self.root/'package.json').write_text(json.dumps({'dependencies':self.dependencies}))
         (self.root/'package-lock.json').write_text('{"packages":{}}')
-        (self.root/'Containerfile').write_text('FROM fixture')
+        (self.root/'Containerfile').write_text('FROM docker.io/library/node:24.21.0-bookworm-slim\n')
         self.original={name:(self.root/name).read_bytes() for name in ('package.json','package-lock.json')}
 
     def fake_resolve(self,c,stage):
@@ -63,6 +63,53 @@ class LatestTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'registry unavailable'):m.update_latest({'IMAGE':'fixture'})
             update.assert_not_called()
         for name,content in self.original.items():self.assertEqual((self.root/name).read_bytes(),content)
+
+    def test_first_install_uses_latest_exact_manifests_without_existing_stack_image(self):
+        contexts=[]
+        def install(c,context):
+            contexts.append(context)
+            package=json.loads((context/'package.json').read_text())
+            self.assertEqual({name:package['dependencies'][name] for name in m.LATEST_PACKAGES},
+                             {name:'2.0.0' for name in m.LATEST_PACKAGES})
+            self.assertEqual(package['dependencies']['@iarna/toml'],'3.0.0')
+            (self.root/'data/active-image').write_text('new-image\n')
+        with patch.object(m,'ROOT',self.root),patch.object(m,'resolve_latest',side_effect=self.fake_resolve),patch.object(m,'install',side_effect=install),patch.object(m,'update') as update,patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=10*1024**3)):
+            release=m.install_latest({'IMAGE':'fixture'})
+        update.assert_not_called()
+        record=json.loads((release/'release.json').read_text())
+        self.assertEqual((record['operation'],record['status'],record['image']),('install','applied','new-image'))
+        self.assertEqual(json.loads((release/'package.json').read_text())['dependencies']['@openai/codex'],'2.0.0')
+        self.assertTrue((release/'package-lock.json').exists())
+        self.assertFalse(contexts[0].exists())
+        for name,content in self.original.items():self.assertEqual((self.root/name).read_bytes(),content)
+
+    def test_first_install_registry_failure_leaves_no_runtime_or_active_image(self):
+        with patch.object(m,'ROOT',self.root),patch.object(m,'resolve_latest',side_effect=RuntimeError('registry unavailable')),patch.object(m,'install') as install,patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=10*1024**3)):
+            with self.assertRaisesRegex(RuntimeError,'registry unavailable'):m.install_latest({'IMAGE':'fixture'})
+        install.assert_not_called()
+        self.assertFalse((self.root/'data/active-image').exists())
+        self.assertFalse(list((self.root/'data').glob('install-build-*')))
+        record=json.loads(next((self.root/'data/releases').glob('*/release.json')).read_text())
+        self.assertEqual((record['operation'],record['status']),('install','failed'))
+
+    def test_resolver_uses_pinned_node_without_installed_image_and_passes_proxy_and_ca(self):
+        settings={'IMAGE':'missing-stack','HTTPS_PROXY':'http://proxy.example.invalid:3128','NO_PROXY':'localhost','BUILD_NETWORK':'host'}
+        ca=self.root/'company.pem';ca.write_text('fixture certificate')
+        with patch.object(m,'ROOT',self.root),patch.object(m,'pod',return_value=SimpleNamespace(stdout=json.dumps({name:'2.0.0' for name in m.LATEST_PACKAGES}))) as pod,patch.object(m,'image_id',side_effect=AssertionError('must not require an application image')),patch.object(m,'bundle_ca',return_value=ca),patch.object(m,'exists',return_value=False):
+            m.resolve_latest(settings,self.root)
+        args=pod.call_args.args
+        self.assertEqual(args[args.index('--entrypoint')+2],'docker.io/library/node:24.21.0-bookworm-slim')
+        self.assertEqual(args[args.index('--network')+1],'host')
+        self.assertIn(str(ca)+':/tmp/company-ca.pem:ro,z',args)
+        self.assertIn('NODE_EXTRA_CA_CERTS=/tmp/company-ca.pem',args)
+        self.assertIn('HTTPS_PROXY',args)
+        self.assertEqual(pod.call_args.kwargs['env']['HTTPS_PROXY'],settings['HTTPS_PROXY'])
+
+    def test_resolver_rejects_floating_node_base_without_network_request(self):
+        (self.root/'Containerfile').write_text('FROM docker.io/library/node:latest\n')
+        with patch.object(m,'pod') as pod:
+            with self.assertRaisesRegex(RuntimeError,'pinned Node base'):m.resolve_latest({'IMAGE':'fixture'},self.root)
+        pod.assert_not_called()
 
     @unittest.skipUnless(shutil.which('node'),'Node.js is required to exercise the exact resolver program')
     def test_resolver_uses_exact_stable_versions_and_rejects_prerelease_or_bad_lock(self):

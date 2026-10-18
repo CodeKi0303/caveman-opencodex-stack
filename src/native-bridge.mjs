@@ -10,6 +10,8 @@ const hopHeaders = ['connection','keep-alive','proxy-authenticate','proxy-author
   'te','trailer','transfer-encoding','upgrade','host'];
 const requestDenied = new Set([...hopHeaders, 'x-caveman-gateway-key', 'x-caveman-compression', 'cookie',
   'forwarded','x-forwarded-for','x-forwarded-host','x-forwarded-proto']);
+const serverAuthRequestDenied = new Set([...requestDenied, 'authorization', 'chatgpt-account-id',
+  'x-api-key', 'openai-organization', 'openai-project', 'cookie2']);
 const responseDenied = new Set([...hopHeaders, 'x-caveman-gateway-key', 'authorization',
   'chatgpt-account-id','x-api-key','cookie','set-cookie','location']);
 const routes = new Map([
@@ -38,6 +40,11 @@ function cleanHeaders(headers, denied) {
     !blocked.has(name.toLowerCase()) && !name.toLowerCase().startsWith('access-control-')));
 }
 
+function clientAuthMode(value = 'forward') {
+  if (!['forward', 'server'].includes(value)) throw Error('Invalid bridge client authentication mode');
+  return value;
+}
+
 function isLoopback(address) {
   return ['127.0.0.1','::1','::ffff:127.0.0.1'].includes(address);
 }
@@ -61,11 +68,13 @@ function validLocalRequest(req) {
 }
 
 /** A local-only, streaming adapter for Codex's built-in openai provider.
- * The provider supplies OAuth/account headers; this adapter adds the LAN key.
+ * Adds the LAN key and optionally removes client model credentials before LAN.
  * The destination is fixed at startup and never derived from incoming headers.
  */
-export function createNativeBridge({upstreamUrl, key, maxRequestBytes = DEFAULT_LIMIT, timeoutMs = 300000, getSettings} = {}) {
+export function createNativeBridge({upstreamUrl, key, maxRequestBytes = DEFAULT_LIMIT, timeoutMs = 300000,
+  clientAuthMode: initialClientAuthMode = 'forward', getSettings} = {}) {
   canonicalUpstream(upstreamUrl);
+  clientAuthMode(initialClientAuthMode);
   if (typeof key !== 'string' || key.length < 32 || /[\r\n]/.test(key))
     throw Error('Bridge gateway key must be at least 32 characters without line breaks');
   if (!Number.isSafeInteger(maxRequestBytes) || maxRequestBytes < 1 || maxRequestBytes > DEFAULT_LIMIT)
@@ -81,20 +90,21 @@ export function createNativeBridge({upstreamUrl, key, maxRequestBytes = DEFAULT_
   };
   const server = http.createServer((req, res) => {
     if (!validLocalRequest(req)) return sendError(res,403,'Only same-origin loopback clients are allowed');
-    let destination, activeKey, compression;
+    let destination, activeKey, compression, authMode;
     try {
-      const settings = getSettings?.() ?? {upstreamUrl,key};
+      const settings = getSettings?.() ?? {upstreamUrl,key,clientAuthMode:initialClientAuthMode};
       destination = canonicalUpstream(settings.upstreamUrl);
       activeKey = settings.key;
       if (typeof activeKey !== 'string' || activeKey.length < 32 || /[\r\n]/.test(activeKey)) throw Error();
       compression = settings.compression !== false;
+      authMode = clientAuthMode(settings.clientAuthMode);
     } catch { return sendError(res,503,'Bridge settings are unavailable'); }
     const request = destination.protocol === 'https:' ? https.request : http.request;
     if (req.url === '/healthz' && req.method === 'GET') {
       res.writeHead(200, {'content-type':'application/json','cache-control':'no-store'})
         .end(JSON.stringify({service:'caveman-native-bridge',status:'ok',ok:true,
           upstream:destination.href,upstreamUrl:destination.href,pid:process.pid,max_request_bytes:maxRequestBytes,
-          compression,controlVersion:1}));
+          compression,clientAuthMode:authMode,controlVersion:1}));
       return;
     }
     const [pathname] = (req.url ?? '').split('?');
@@ -113,7 +123,7 @@ export function createNativeBridge({upstreamUrl, key, maxRequestBytes = DEFAULT_
     let responseStream;
     const upstream = request({protocol:destination.protocol, hostname:destination.hostname,
       port:destination.port || undefined, method:req.method, path:req.url,
-      headers:{...cleanHeaders(req.headers,requestDenied),'x-caveman-gateway-key':activeKey,
+      headers:{...cleanHeaders(req.headers,authMode==='server'?serverAuthRequestDenied:requestDenied),'x-caveman-gateway-key':activeKey,
         'x-caveman-compression':compression?'on':'off'}}, response => {
       responseStream = response;
       if (rejected || res.destroyed || res.writableEnded) { response.destroy(); return; }

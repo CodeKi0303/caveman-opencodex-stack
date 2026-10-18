@@ -105,6 +105,53 @@ test('server setup checks ownership before build and keeps existing TLS endpoint
   assert(!commands.some(a=>a.includes('build')||a.includes('install')));
   blocked=false;const result=await manager.installServer({adopt:true});assert.equal(result.upstreamUrl,f.original.upstreamUrl);assert.equal(result.tls,true);
   assert(commands.some(a=>a.includes('--adopt-existing')));
+  assert(!commands.some(a=>a.includes('build')||a.includes('up')||a.includes('update')));
+});
+
+function serverFixture(t,{image=false,prepareFails=false}={}) {
+  const f=fixture(t),commands=[];
+  const env='STACK_NAME=caveman-stack\nIMAGE=local/test\nBIND_ADDRESS=127.0.0.1\nPORT=18787\nADMIN_PORT=20100\nHTTPS_PROXY=https://proxy.example\n';
+  fs.writeFileSync(path.join(f.repo,'.env'),env);
+  const run=async(command,args)=>{
+    commands.push([command,...args]);
+    if(command==='python3'&&args[0]==='--version')return 'Python 3.11.2';
+    if(command==='podman'&&args[0]==='--version')return 'podman version 5.0.0';
+    if(args.includes('status'))return JSON.stringify({ok:true,installed:false,owned:false});
+    if(command==='podman'&&args[0]==='image'&&!image)throw Error('missing image');
+    if(prepareFails&&args[0]===path.join(f.repo,'stack')&&args[1]==='up')throw Error('FIRST_INSTALL_FAILED');
+    return '';
+  };
+  const manager=createManager({repo:f.repo,codexHome:f.home,uid:1000,env:{},run,visible:run});
+  return {...f,manager,commands,env,actions:()=>commands.filter(a=>a[0]==='python3'&&a[1]!=='--version'&&!a.includes('status')).map(a=>[path.basename(a[1]),...a.slice(2)])};
+}
+test('clean server setup defaults to latest before service startup without a second install',async t=>{
+  for(const options of [{},{latest:true}]){
+    const f=serverFixture(t);
+    await f.manager.installServer(options);
+    assert.deepEqual(f.actions(),[['stack','up'],['install-stack-service.py','install','--user']]);
+    assert.equal(fs.readFileSync(path.join(f.repo,'.env'),'utf8'),f.env);
+    assert.equal(fs.readFileSync(f.keyFile,'utf8'),f.key);
+  }
+});
+test('explicit pinned first install builds once before service startup',async t=>{
+  const f=serverFixture(t);
+  await f.manager.installServer({latest:false});
+  assert.deepEqual(f.actions(),[['stack','build'],['install-stack-service.py','install','--user']]);
+});
+test('existing image is preserved unless setup explicitly selects latest update',async t=>{
+  for(const options of [{},{latest:false},{latest:true}]){
+    const f=serverFixture(t,{image:true});
+    await f.manager.installServer(options);
+    assert.deepEqual(f.actions(),[['install-stack-service.py','install','--user'],...(options.latest?[['stack','update','--latest']]:[])]);
+  }
+});
+test('failed latest first install does not register or start a service',async t=>{
+  const f=serverFixture(t,{prepareFails:true});
+  await assert.rejects(f.manager.installServer(),/FIRST_INSTALL_FAILED/);
+  assert.deepEqual(f.actions(),[['stack','up']]);
+  assert.equal(fs.readFileSync(path.join(f.repo,'.env'),'utf8'),f.env);
+  assert.equal(fs.readFileSync(f.keyFile,'utf8'),f.key);
+  assert(!fs.existsSync(path.join(f.dir,'manager.lock')));
 });
 
 test('client-only wizard does not build a server, asks masked key once, and supports skipping login',async()=>{
@@ -115,10 +162,11 @@ test('client-only wizard does not build a server, asks masked key once, and supp
   const result=await setup(io,manager);assert.equal(result.ok,true);assert.equal(hidden,1);assert.equal(calls[0].key,key);assert(!lines.join('\n').includes(key));assert.equal(calls[0].local,false);
 });
 test('full-server wizard discovers key/repo, registers startup, and never asks for a key',async()=>{
-  const answers=['1','1','18787','20100','18788','18790'],confirmations=[false,true,true,false],calls=[];
-  const io={write:()=>{},ask:async()=>answers.shift(),confirm:async()=>confirmations.shift(),secret:async()=>{throw Error('must not ask');}};
+  const answers=['1','1','18787','20100','18788','18790'],confirmations=[true,true,true,false],calls=[],questions=[];
+  const io={write:()=>{},ask:async()=>answers.shift(),confirm:async(question,fallback)=>{questions.push({question,fallback});return confirmations.shift();},secret:async()=>{throw Error('must not ask');}};
   const manager={settings:()=>null,requirements:async()=>({ok:true,missing:[],systemd:true}),serviceScope:()=> 'system',defaults:async()=>({port:18788,controlPort:18790}),installServer:async opts=>{calls.push(opts);return {upstreamUrl:'http://127.0.0.1:18787/v1',keyFile:'/fixture/secrets/gateway-key'};},configureConnection:async c=>{calls.push(c);return {controlUrl:'http://127.0.0.1:18790/'};},doctor:async()=>({ok:true,warnings:[]}),codexHome:'/nonexistent/codex',repo:'/nonexistent/repo',isWsl:false};
-  await setup(io,manager);assert.equal(calls[0].bindAddress,'127.0.0.1');assert.equal(calls[1].keyFile,'/fixture/secrets/gateway-key');assert.equal(calls[1].local,true);
+  await setup(io,manager);assert.equal(calls[0].bindAddress,'127.0.0.1');assert.equal(calls[0].latest,true);assert.equal(calls[1].keyFile,'/fixture/secrets/gateway-key');assert.equal(calls[1].local,true);
+  assert.match(questions[0].question,/최초 설치.*Caveman·OpenCodex·Pod Codex CLI/);assert.equal(questions[0].fallback,true);
 });
 test('terminal secret input disables echo before showing prompt and restores terminal',async()=>{
   const input=new PassThrough(),output=new PassThrough();input.isTTY=true;output.isTTY=true;input.isRaw=false;let display='';

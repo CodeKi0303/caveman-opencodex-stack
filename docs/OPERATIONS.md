@@ -24,7 +24,9 @@ TimeoutStopSec=60
 WantedBy=default.target
 ```
 
-최초 `stack build` 후 기존 수동 실행 컨테이너를 `./stack down`으로 종료한 뒤:
+먼저 `./stack init`과 `./stack up`으로 최신 안정 버전의 첫 설치를 완료합니다.
+그 후 수동 실행 컨테이너를 `./stack down`으로 종료하고 서비스를 등록합니다.
+긴 최초 빌드는 위 systemd 시작 제한 시간 밖에서 완료하며, 이후 부팅은 저장된 이미지만 사용합니다.
 
 ```bash
 systemctl --user daemon-reload
@@ -34,6 +36,24 @@ systemctl --user enable --now caveman-stack.service
 로그아웃 이후에도 시작되게 하려면 시스템 관리자가 `loginctl enable-linger <사용자>`를 설정합니다.
 이 oneshot unit은 부팅 시작/정지를 제공합니다. 컨테이너 crash의 자동 복구·알림은 포함하지 않습니다.
 운영 감시가 필요한 조직은 자체 Podman Quadlet/모니터링 기준에 통합하세요.
+
+## 최초 설치와 최신 안정 버전
+
+새 clone에서 `./stack init` 후 `./stack up`을 실행하면 Caveman·OpenCodex·Pod Codex CLI의
+npm `latest`를 조회해 정확한 버전으로 고정한 빌드 컨텍스트를 만듭니다. 호스트 npm이나 기존
+실행 컨테이너 없이 고정 Node 이미지로 버전을 조회하므로 첫 설치에도 사용할 수 있습니다.
+프록시와 회사 CA 설정은 버전 조회와 빌드 모두에 적용됩니다. 최신 버전 조회가 실패하거나
+정식 버전이 아니면 설치를 중단하고 예전 고정 버전으로 대체하지 않습니다.
+
+활성 이미지 기록이나 미리 빌드한 이미지가 있으면 `up`은 그 이미지를 사용합니다.
+재현용 Git 고정 버전이 필요하면 `./stack build` 후 `./stack up`을 실행합니다.
+`./manage`의 새 전체 서버 설치도 기본적으로 첫 빌드부터 최신 안정 버전을 사용합니다.
+
+2026-10-18 UTC 검증: 별도 설치 디렉터리·컨테이너·키로 최초 `init` → `up`을 실행해
+Caveman 4.0.1·OpenCodex 2.88.0·Pod Codex CLI 0.163.0 선택, 준비 상태·카탈로그,
+Codex CLI 실행과 `down` → `up` 후 동일 이미지·release 유지를 확인했습니다.
+운영 컨테이너와 로그인 데이터는 변경하거나 복사하지 않았습니다.
+전체 자동 테스트 222개 통과, 환경별 3개 건너뜀. 실제 회사망과 Windows 앱 검증은 포함하지 않았습니다.
 
 ## Git과 최신 안정 버전 업데이트
 

@@ -208,7 +208,7 @@ export function createManager({codexHome,scope,repo=repository,nodePath=process.
     catch{throw Error('PANEL_INSTALL_FAILED');}
   }
   const clientArgs=(action,c)=>[action,'--url',c.upstreamUrl,'--key-file',c.keyFile,'--codex-home',home];
-  async function installServer({bindAddress='127.0.0.1',port=18787,adminPort=20100,latest=false,linger=false,adopt=false}={}) {
+  async function installServer({bindAddress='127.0.0.1',port=18787,adminPort=20100,latest,linger=false,adopt=false}={}) {
     return locked(async()=>{
       const scope=serviceScope(),pre=await requirements({server:true,scope,run:command});if(!pre.ok)throw Error(pre.systemd?'DEPENDENCIES_MISSING':'SYSTEMD_UNAVAILABLE');
       const oldEnv=readEnvironment(path.join(repo,'.env'));
@@ -222,11 +222,18 @@ export function createManager({codexHome,scope,repo=repository,nodePath=process.
       const preflight=JSON.parse(await command('python3',[script('install-stack-service.py'),'status','--'+scope]));
       if(preflight.ok===false||preflight.installed&&!preflight.owned&&(!adopt||!preflight.adoptable))throw Error('SERVER_OWNERSHIP_FAILED');
       let image=false;try{await command('podman',['image','exists',bytes(path.join(repo,'data/active-image'))?.toString().trim()||cfg.IMAGE]);image=true;}catch{}
-      if(!image)await show('python3',[path.join(repo,'stack'),'build']);
+      if(!image){
+        // A clean stack up resolves the three latest stable packages before its
+        // first build. Finish that work outside systemd's startup timeout. An
+        // explicit pinned choice still builds the checked-in lockfile first.
+        await show('python3',[path.join(repo,'stack'),latest===false?'build':'up']);
+      }
       // The service installer launches a first container or adopts a verified
       // existing one; it also handles rollback and boot registration.
       await show('python3',[script('install-stack-service.py'),'install','--'+scope,...(linger?['--enable-linger']:[]),...(adopt?['--adopt-existing']:[])]);
-      if(latest)await show('python3',[path.join(repo,'stack'),'update','--latest']);
+      // Only an explicit update choice changes an existing installation. A
+      // clean latest install above already has all three packages resolved.
+      if(image&&latest===true)await show('python3',[path.join(repo,'stack'),'update','--latest']);
       const address=['0.0.0.0','::',''].includes(cfg.BIND_ADDRESS)?'127.0.0.1':cfg.BIND_ADDRESS;
       const tls=Boolean(cfg.GATEWAY_TLS_CERT&&cfg.GATEWAY_TLS_KEY),prior=settings();
       const upstreamUrl=prior?.management?.mode==='local'?prior.upstreamUrl:`${tls?'https':'http'}://${address}:${cfg.PORT}/v1`;

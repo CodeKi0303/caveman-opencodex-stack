@@ -118,7 +118,9 @@ export async function setup(io,manager) {
       options={bindAddress:share==='2'?'0.0.0.0':'127.0.0.1',port:validatePort(await io.ask('모델 API 포트','18787')),adminPort:validatePort(await io.ask('OpenCodex 관리자 포트','20100'))};
       io.write('관리자 화면은 이 Linux의 127.0.0.1에만 공개합니다. 서버 접속 키는 자동 생성합니다.');
     }
-    options.latest=await io.confirm('기동 후 최신 안정 Caveman·OpenCodex·컨테이너 Codex까지 적용할까요?',true);
+    options.latest=await io.confirm(oldEnv
+      ?'기존 서버의 Caveman·OpenCodex·Pod Codex CLI를 최신 안정 버전으로 업데이트할까요?'
+      :'최초 설치에 최신 안정 Caveman·OpenCodex·Pod Codex CLI 버전을 사용할까요?',true);
     if(manager.serviceScope()==='user'){
       options.linger=await io.confirm('로그아웃 후에도 사용자 서비스를 유지할까요? (관리자 인증 필요)',true);
       if(options.linger)await manager.authorizeLinger();

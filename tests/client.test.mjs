@@ -50,6 +50,55 @@ test('configure installs one provider and HTTP recovery MCP, disables request co
   assert.deepEqual(config.features,{example:true,enable_request_compression:false});
   assert(fs.readFileSync(path.join(f.home,'config.toml'),'utf8').includes('# retain this comment'));
   assert.equal(fs.existsSync(path.join(f.home,'auth.json')),false);
+  assert.equal(result.clientAuthMode,'forward');
+});
+
+test('custom server authentication requires only the gateway key and survives reconfiguration',async t=>{
+  const f=fixture(t);
+  const result=await f.run('configure','--client-auth-mode','server');
+  assert.equal(result.clientAuthMode,'server');assert.deepEqual(result.warnings,[]);
+  assert.equal(f.configValue().model_providers.caveman_stack.requires_openai_auth,false);
+  assert.equal(f.configValue().model_providers.caveman_stack.http_headers['x-caveman-gateway-key'],oldKey);
+  assert.equal(fs.existsSync(path.join(f.home,'auth.json')),false);
+  const before=f.snapshot();
+  for(const command of ['configure','reconfigure','sync']) {
+    const repeated=await f.run(command);
+    assert.equal(repeated.clientAuthMode,'server');assert.equal(repeated.changed,false);
+    assert.deepEqual(repeated.warnings,[]);assert.deepEqual(f.snapshot(),before);
+  }
+  assert(f.state.requests.every(row=>row.headers.Authorization===undefined));
+  const forward=await f.run('reconfigure','--client-auth-mode','forward');
+  assert.equal(forward.clientAuthMode,'forward');
+  assert.equal(f.configValue().model_providers.caveman_stack.requires_openai_auth,true);
+});
+
+test('server authentication removes only selected custom provider credential overrides',async t=>{
+  const f=fixture(t,`model_provider = "other"\n[model_providers.other]\nname = "Keep"\nrequires_openai_auth = true\nhttp_headers = { Authorization = "unrelated-credential" }\n[model_providers.target]\nname = "Target"\nrequires_openai_auth = true\nenv_key = "TARGET_KEY"\nexperimental_bearer_token = "target-credential"\nhttp_headers = { Authorization = "old-credential", ChatGPT-Account-Id = "old-account", X-API-Key = "old-api-key", OpenAI-Organization = "old-org", OpenAI-Project = "old-project", Cookie = "old-cookie", Cookie2 = "old-cookie2", X-Other = "keep" }\nenv_http_headers = { authorization = "OLD_AUTH", chatgpt-account-id = "OLD_ACCOUNT", x-api-key = "OLD_API_KEY", openai-organization = "OLD_ORG", openai-project = "OLD_PROJECT", cookie = "OLD_COOKIE", cookie2 = "OLD_COOKIE2", X-Other = "KEEP_ENV" }\n`);
+  const other=f.configValue().model_providers.other;
+  fs.writeFileSync(path.join(f.home,'auth.json'),'{"tokens":{"access_token":"keep-local-login"}}');
+  const authBefore=fs.readFileSync(path.join(f.home,'auth.json'));
+  const result=await f.run('reconfigure','--provider','target','--client-auth-mode','server');
+  const config=f.configValue(),selected=config.model_providers.target;
+  assert.equal(config.model_provider,'other');assert.deepEqual(config.model_providers.other,other);
+  assert.equal(selected.requires_openai_auth,false);
+  assert.equal(selected.env_key,undefined);assert.equal(selected.experimental_bearer_token,undefined);
+  assert.deepEqual(selected.http_headers,{'X-Other':'keep','x-caveman-gateway-key':oldKey});
+  assert.deepEqual(selected.env_http_headers,{'X-Other':'KEEP_ENV'});
+  assert.deepEqual(fs.readFileSync(path.join(f.home,'auth.json')),authBefore);
+  assert.equal(result.clientAuthMode,'server');assert(result.warnings.includes('updated_provider_is_not_selected'));
+});
+
+test('server authentication rejects auth-file conflicts and invalid modes before I/O',async t=>{
+  const f=fixture(t),before=f.snapshot();
+  await assert.rejects(f.run('configure','--client-auth-mode','invalid'),{code:'INVALID_CLIENT_AUTH_MODE'});
+  for(const command of ['configure','reconfigure','sync','doctor','export'])
+    await assert.rejects(f.run(command,'--client-auth-mode','server','--auth-file','/missing-auth.json'),{code:'CLIENT_AUTH_MODE_CONFLICT'});
+  await assert.rejects(f.run('configure','--provider','openai','--client-auth-mode','server'),{code:'CLIENT_AUTH_MODE_PROVIDER_MISMATCH'});
+  assert.equal(f.state.requests.length,0);assert.deepEqual(f.snapshot(),before);
+  await f.run('configure','--client-auth-mode','server');
+  const configured=f.snapshot(),requestCount=f.state.requests.length;
+  await assert.rejects(f.run('sync','--auth-file','/missing-auth.json'),{code:'CLIENT_AUTH_MODE_CONFLICT'});
+  assert.equal(f.state.requests.length,requestCount);assert.deepEqual(f.snapshot(),configured);
 });
 
 test('built-in openai configuration uses healthy local bridge while catalog, MCP and sync metadata keep the authenticated remote gateway',async t=>{
@@ -251,6 +300,17 @@ test('doctor initializes HTTP MCP and lists recovery tools without changing loca
   const expiredBefore=f.snapshot(),expired=await runClient(['doctor',...args]);
   assert.equal(expired.ok,false);assert.equal(expired.auth.status,'access_token_expired');
   assert(expired.warnings.includes('access_token_expired'));assert.deepEqual(f.snapshot(),expiredBefore);
+  await runClient(['reconfigure',...args,'--client-auth-mode','server']);
+  fs.unlinkSync(path.join(f.home,'auth.json'));
+  const serverBefore=f.snapshot(),serverAuth=await runClient(['doctor',...args]);
+  assert.equal(serverAuth.ok,true,JSON.stringify(serverAuth));assert.equal(serverAuth.clientAuthMode,'server');
+  assert.equal(serverAuth.auth.required,false);assert.equal(serverAuth.auth.status,'missing');
+  assert.deepEqual(serverAuth.warnings,[]);assert.deepEqual(f.snapshot(),serverBefore);
+  assert(requests.every(row=>row.headers.authorization===undefined));
+  await runClient(['reconfigure',...args,'--client-auth-mode','forward']);
+  const missingAuth=await runClient(['doctor',...args]);
+  assert.equal(missingAuth.ok,false);assert.equal(missingAuth.clientAuthMode,'forward');
+  assert.equal(missingAuth.auth.required,true);assert(missingAuth.warnings.includes('missing'));
   const cfgFile=path.join(f.home,'config.toml');
   fs.writeFileSync(cfgFile,patchConfig(fs.readFileSync(cfgFile,'utf8'),[
     {path:['model_providers','caveman_stack','env_http_headers'],value:{'X-CAVEMAN-GATEWAY-KEY':'STALE_KEY'}},
@@ -289,6 +349,10 @@ test('openai doctor checks the actual bridge gateway authentication separately f
   assert.equal(result.bridge.upstreamMatches,true);assert.equal(result.bridge.models,1);
   assert.equal(result.catalog.ok,true);assert.equal(result.mcp.ok,true);assert.deepEqual(f.snapshot(),before);
   assert(requests.every(r=>r.headers.authorization===undefined));
+  fs.unlinkSync(path.join(f.home,'auth.json'));
+  const missingAuth=await runClient(['doctor',...args]);
+  assert.equal(missingAuth.ok,false);assert.equal(missingAuth.clientAuthMode,'forward');
+  assert.equal(missingAuth.auth.required,true);assert(missingAuth.warnings.includes('missing'));
   requiredKey=newKey;fs.writeFileSync(path.join(f.home,'key'),newKey);
   const staleBefore=f.snapshot(),stale=await runClient(['doctor',...args]);
   assert.equal(stale.ok,false);assert.equal(stale.catalog.ok,true);assert.equal(stale.mcp.ok,true);

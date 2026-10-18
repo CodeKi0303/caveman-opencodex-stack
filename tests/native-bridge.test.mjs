@@ -19,7 +19,7 @@ test('bridge reloads destination policy per request and overrides caller compres
   assert.equal(seen[1]['x-caveman-compression'],'on');assert.equal(seen[1]['x-caveman-gateway-key'],settings.key);
   settings={...settings,upstreamUrl:'file:///etc/passwd'};assert.equal((await call(url+'/v1/responses',{method:'POST',body:'{}'})).status,503);
 });
-async function fixture(t, {handler, maxRequestBytes = 1024, timeoutMs = 1000} = {}) {
+async function fixture(t, {handler, maxRequestBytes = 1024, timeoutMs = 1000, clientAuthMode = 'forward', getSettings} = {}) {
   const seen = [];
   const backend = http.createServer((req, res) => {
     const record = {url:req.url,method:req.method,headers:req.headers,body:''};
@@ -31,7 +31,8 @@ async function fixture(t, {handler, maxRequestBytes = 1024, timeoutMs = 1000} = 
   backend.listen(0,'127.0.0.1');
   await once(backend,'listening');
   const upstreamUrl = `http://127.0.0.1:${backend.address().port}/v1`;
-  const bridge = createNativeBridge({upstreamUrl,key,maxRequestBytes,timeoutMs});
+  const bridge = createNativeBridge({upstreamUrl,key,maxRequestBytes,timeoutMs,clientAuthMode,
+    ...(getSettings?{getSettings:()=>getSettings({upstreamUrl,key})}:{})});
   bridge.listen(0,'127.0.0.1');
   await once(bridge,'listening');
   t.after(() => {
@@ -76,6 +77,52 @@ test('native bridge injects fixed key and preserves OAuth/account attribution',a
   assert.equal(f.seen[0].body,'{"input":"fixture"}');
 });
 
+test('server authentication removes client credentials for every supported route without changing payloads',async t => {
+  const f = await fixture(t,{clientAuthMode:'server'});
+  const credentials = {authorization:'Bearer oauth-fixture','chatgpt-account-id':'account-fixture',
+    'x-api-key':'api-key-fixture','openai-organization':'organization-fixture',
+    'openai-project':'project-fixture',cookie:'cookie-fixture',cookie2:'cookie2-fixture'};
+  const headers = {...credentials,'x-caveman-gateway-key':'caller-key','content-type':'application/json',
+    'x-codex-turn-metadata':'{"subagent_kind":"thread_spawn"}','x-openai-subagent':'collab_spawn'};
+  const body='{"input":"fixture","image":"data:image/png;base64,c3ludGhldGlj"}';
+  for (const route of ['responses','responses/compact','images/generations','images/edits','alpha/search']) {
+    assert.equal((await call(f.url+'/v1/'+route,{method:'POST',body,headers})).status,200);
+    assert.equal(f.seen.at(-1).body,body);
+  }
+  for (const [route,method] of [['models?client_version=fixture','GET'],['catalog','GET'],['catalog','HEAD']])
+    assert.equal((await call(f.url+'/v1/'+route,{method,headers})).status,200);
+  assert.equal(f.seen.length,8);
+  for (const record of f.seen) {
+    for (const name of Object.keys(credentials)) assert.equal(record.headers[name],undefined,name);
+    assert.equal(record.headers['x-caveman-gateway-key'],key);
+    assert.equal(record.headers['x-caveman-compression'],'on');
+    assert.equal(record.headers['x-codex-turn-metadata'],headers['x-codex-turn-metadata']);
+    assert.equal(record.headers['x-openai-subagent'],'collab_spawn');
+  }
+  assert.equal(JSON.parse((await call(f.url+'/healthz')).body).clientAuthMode,'server');
+});
+
+test('client authentication policy reloads per request and rejects invalid modes before forwarding',async t => {
+  let mode;
+  const f = await fixture(t,{getSettings:base=>({...base,clientAuthMode:mode})});
+  const headers={authorization:'Bearer oauth-fixture','chatgpt-account-id':'account-fixture'};
+  for (const [selected,expected] of [[undefined,'Bearer oauth-fixture'],['server',undefined],['forward','Bearer oauth-fixture']]) {
+    mode=selected;
+    assert.equal((await call(f.url+'/v1/responses',{method:'POST',body:'{}',headers})).status,200);
+    assert.equal(f.seen.at(-1).headers.authorization,expected);
+    assert.equal(JSON.parse((await call(f.url+'/healthz')).body).clientAuthMode,selected??'forward');
+  }
+  for (const invalid of ['typo','',null,false,{}]) {
+    mode=invalid;
+    assert.equal((await call(f.url+'/v1/responses',{method:'POST',body:'{}',headers})).status,503);
+    assert.equal((await call(f.url+'/healthz')).status,503);
+  }
+  assert.equal(f.seen.length,3);
+  mode='server';
+  assert.equal((await call(f.url+'/v1/responses',{method:'POST',body:'{}',headers})).status,200);
+  assert.equal(f.seen.at(-1).headers.authorization,undefined);
+});
+
 test('all gateway model, tool and catalog routes use the fixed upstream',async t => {
   const f = await fixture(t);
   for (const route of ['responses','responses/compact','images/generations','images/edits','alpha/search'])
@@ -87,7 +134,7 @@ test('all gateway model, tool and catalog routes use the fixed upstream',async t
   assert(f.seen.every(row => row.headers['x-caveman-gateway-key'] === key));
   const health = await call(f.url+'/healthz');
   assert.deepEqual(JSON.parse(health.body),{service:'caveman-native-bridge',status:'ok',ok:true,
-    upstream:f.upstreamUrl,upstreamUrl:f.upstreamUrl,pid:process.pid,max_request_bytes:1024,compression:true,controlVersion:1});
+    upstream:f.upstreamUrl,upstreamUrl:f.upstreamUrl,pid:process.pid,max_request_bytes:1024,compression:true,clientAuthMode:'forward',controlVersion:1});
   assert.equal(f.seen.length,8);
 });
 
@@ -154,6 +201,25 @@ test('SSE reaches the caller before the upstream finishes',async t => {
   assert.equal((await reader.read()).done,true);
 });
 
+test('server authentication preserves incremental SSE while stripping client credentials',async t => {
+  let finishStream;
+  const f = await fixture(t,{clientAuthMode:'server',timeoutMs:10000,handler:(_req,res) => {
+    res.writeHead(200,{'content-type':'text/event-stream'});
+    res.write('data: first\n\n');
+    finishStream=()=>res.end('data: last\n\n');
+  }});
+  const response=await fetch(f.url+'/v1/responses',{method:'POST',body:'{}',headers:{
+    authorization:'Bearer oauth-fixture','chatgpt-account-id':'account-fixture'}});
+  const reader=response.body.getReader();
+  assert.equal(new TextDecoder().decode((await reader.read()).value),'data: first\n\n');
+  assert.equal(f.seen[0].headers.authorization,undefined);
+  assert.equal(f.seen[0].headers['chatgpt-account-id'],undefined);
+  assert.equal(f.seen[0].headers['x-caveman-gateway-key'],key);
+  finishStream();
+  assert.equal(new TextDecoder().decode((await reader.read()).value),'data: last\n\n');
+  assert.equal((await reader.read()).done,true);
+});
+
 test('declared and streaming request bodies are bounded',async t => {
   const f = await fixture(t,{maxRequestBytes:16});
   const declared = await call(f.url+'/v1/responses',{method:'POST',body:'x'.repeat(17),headers:{'content-length':'17'}});
@@ -215,5 +281,7 @@ test('startup rejects destinations containing secrets or unfixed paths',() => {
     assert.throws(() => createNativeBridge({upstreamUrl,key}));
   for (const maxRequestBytes of [0,-1,268435457,1.5])
     assert.throws(() => createNativeBridge({upstreamUrl:'http://127.0.0.1:18787/v1',key,maxRequestBytes}));
+  for (const clientAuthMode of ['typo','',null,false,{}])
+    assert.throws(() => createNativeBridge({upstreamUrl:'http://127.0.0.1:18787/v1',key,clientAuthMode}));
   assert.throws(() => createNativeBridge({upstreamUrl:'http://127.0.0.1:18787/v1',key:'short'}));
 });

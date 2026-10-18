@@ -15,6 +15,57 @@ spec=importlib.util.spec_from_loader(loader.name,loader)
 m=importlib.util.module_from_spec(spec);loader.exec_module(m)
 
 class StateTests(unittest.TestCase):
+    def test_clean_up_installs_latest_but_existing_or_explicitly_built_images_restart_unchanged(self):
+        for active,local in ((False,False),(False,True),(True,False),(True,True)):
+            with self.subTest(active=active,local=local),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);(root/'data').mkdir()
+                if active:(root/'data/active-image').write_text('immutable-old\n')
+                settings={'STACK_NAME':'fixture','IMAGE':'fixture:configured'}
+                with patch.object(m,'ROOT',root),patch.object(m,'exists',return_value=False),patch.object(m,'image_exists',return_value=local) as image_exists,patch.object(m,'install_latest') as install,patch.object(m,'launch') as launch,patch.object(m,'catalog') as catalog,patch.object(m,'pod',return_value=SimpleNamespace(stdout='immutable-started\n')) as pod:
+                    m.up(settings)
+                if not active and not local:
+                    install.assert_called_once_with(settings);launch.assert_not_called();catalog.assert_not_called();pod.assert_not_called()
+                else:
+                    install.assert_not_called();launch.assert_called_once_with(settings);catalog.assert_called_once_with(settings)
+                    self.assertEqual(pod.call_args.args[2],'immutable-old' if active else 'fixture:configured')
+                    self.assertEqual((root/'data/active-image').read_text(),'immutable-started\n')
+                if active:image_exists.assert_not_called()
+
+    def test_up_refuses_existing_container_before_any_resolve_or_build(self):
+        with patch.object(m,'exists',return_value=True),patch.object(m,'image_exists') as image_exists,patch.object(m,'install_latest') as install:
+            with self.assertRaisesRegex(RuntimeError,'already exists'):m.up({'STACK_NAME':'fixture','IMAGE':'fixture'})
+        image_exists.assert_not_called();install.assert_not_called()
+
+    def test_image_store_error_is_not_mistaken_for_clean_install(self):
+        with patch.object(m,'pod',return_value=SimpleNamespace(returncode=125)):
+            with self.assertRaisesRegex(RuntimeError,'local image store'):m.image_exists('fixture')
+
+    def test_first_install_failure_restores_preexisting_private_state_and_removes_candidate(self):
+        for existing in (False,True):
+            with self.subTest(existing=existing),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);(root/'data').mkdir();state=root/'data/state'
+                if existing:state.mkdir();(state/'auth.json').write_text('private-original')
+                def launch(*args,**kwargs):
+                    state.mkdir(exist_ok=True);(state/'auth.json').write_text('candidate-migrated')
+                with patch.object(m,'ROOT',root),patch.object(m,'exists',return_value=False),patch.object(m,'build'),patch.object(m,'pod',return_value=SimpleNamespace(stdout='new-image\n')),patch.object(m,'launch',side_effect=launch),patch.object(m,'catalog',side_effect=RuntimeError('catalog failed')),patch.object(m,'down') as down:
+                    with self.assertRaisesRegex(RuntimeError,'catalog failed'):m.install({'IMAGE':'fixture:configured','STACK_NAME':'fixture'},context=root)
+                down.assert_called_once()
+                self.assertFalse((root/'data/active-image').exists())
+                self.assertFalse(list((root/'data').glob('install-state-*')))
+                if existing:self.assertEqual((state/'auth.json').read_text(),'private-original')
+                else:self.assertFalse(state.exists())
+                failed=list((root/'data').glob('failed-install-*'))
+                self.assertEqual(len(failed),1)
+                self.assertEqual((failed[0]/'auth.json').read_text(),'candidate-migrated')
+
+    def test_server_auth_mode_is_explicit_and_invalid_modes_do_not_launch(self):
+        self.assertEqual(m.runtime_env({'CLIENT_AUTH_MODE':'server'}),['--env','CLIENT_AUTH_MODE=server'])
+        self.assertEqual(m.runtime_env({'CLIENT_AUTH_MODE':'forward'}),['--env','CLIENT_AUTH_MODE=forward'])
+        self.assertEqual(m.runtime_env({}),[])
+        for mode in ('','false','disabled','SERVER'):
+            with self.subTest(mode=mode),self.assertRaisesRegex(RuntimeError,'CLIENT_AUTH_MODE'):
+                m.runtime_env({'CLIENT_AUTH_MODE':mode})
+
     def test_container_codex_preserves_login_stdin_and_exit_status(self):
         for tty in (False,True):
             with self.subTest(tty=tty):

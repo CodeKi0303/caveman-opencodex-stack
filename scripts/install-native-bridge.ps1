@@ -187,7 +187,7 @@ try {
     $nextConfig = [ordered]@{ upstreamUrl = $UpstreamUrl; keyFile = $KeyFile; port = $Port }
     if (Test-Path -LiteralPath $configPath) {
         $stored = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
-        foreach ($field in @('compression', 'management', 'controlPort')) {
+        foreach ($field in @('compression', 'management', 'controlPort', 'clientAuthMode')) {
             if ($stored.PSObject.Properties.Name -contains $field) { $nextConfig[$field] = $stored.$field }
         }
     }

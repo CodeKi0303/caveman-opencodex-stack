@@ -11,10 +11,9 @@ export function companyCaEnvironment({
   try {
     certs = fs.readdirSync(certsDir).filter(name => /\.(crt|pem)$/.test(name) && name !== 'server.crt').sort();
   } catch (error) {
-    if (error.code === 'ENOENT') return {};
-    throw error;
+    if (error.code !== 'ENOENT') throw error;
+    certs = [];
   }
-  if (!certs.length) return {};
 
   let publicRoots;
   try {
@@ -22,9 +21,11 @@ export function companyCaEnvironment({
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
   }
+  if (publicRoots?.trim() && !certs.length) return {};
   if (!publicRoots?.trim()) {
     // Minimal Node images may omit the OS bundle. Keep public HTTPS trusted
-    // for every child client by including Node's bundled Mozilla roots.
+    // for every child client, even without company CAs, by including Node's
+    // bundled Mozilla roots.
     publicRoots = rootCertificates.join('\n');
   }
   fs.writeFileSync(bundlePath, [publicRoots, ...certs.map(name => fs.readFileSync(path.join(certsDir, name), 'utf8'))].join('\n'));

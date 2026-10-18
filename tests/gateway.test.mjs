@@ -9,7 +9,7 @@ import {createGateway,addressPolicy} from '../src/gateway.mjs';
 import TOML from '@iarna/toml';
 
 const key='a'.repeat(64);
-async function fixture(t,limit=1024){
+async function fixture(t,limit=1024,options={}){
   const seen=[];
   const backend=http.createServer((q,s)=>{const chunks=[];q.on('data',x=>chunks.push(x));q.on('end',()=>{
     seen.push({url:q.url,headers:q.headers,body:Buffer.concat(chunks).toString()});
@@ -18,13 +18,73 @@ async function fixture(t,limit=1024){
   const directory=fs.mkdtempSync(path.join(os.tmpdir(),'catalog-test-'));const catalog=path.join(directory,'models.json');
   fs.writeFileSync(catalog,JSON.stringify({models:[{slug:'fixture',display_name:'Fixture',visibility:'list'}]}));
   const ports=[];
-  const gateway=createGateway({key,maxRequestBytes:limit,catalogPath:catalog,request:(opts,cb)=>{ports.push(opts.port);return http.request({...opts,port:backend.address().port},cb);}});
+  const gateway=createGateway({key,maxRequestBytes:limit,catalogPath:catalog,...options,request:(opts,cb)=>{ports.push(opts.port);return http.request({...opts,port:backend.address().port},cb);}});
   gateway.listen(0,'127.0.0.1');await once(gateway,'listening');
   t.after(()=>{gateway.closeAllConnections();gateway.close();backend.closeAllConnections();backend.close();fs.rmSync(directory,{recursive:true});});
   return {url:'http://127.0.0.1:'+gateway.address().port,ports,seen,catalog};
 }
 test('network allowlist IPv4/IPv6 and mapped addresses',()=>{
   const allow=addressPolicy('10.20.0.0/16,::1/128');assert(allow('::ffff:10.20.1.9'));assert(allow('::1'));assert(!allow('10.21.1.9'));
+});
+
+test('invalid client authentication modes fail before creating a gateway',()=>{
+  for(const clientAuthMode of ['',null,false,'automatic','SERVER'])
+    assert.throws(()=>createGateway({key,clientAuthMode}),/Invalid client authentication mode/);
+});
+
+test('server authentication strips client credentials on compression and bypass routes without changing bodies or SSE',async t=>{
+  const f=await fixture(t,1024,{clientAuthMode:'server'});
+  const credentials={authorization:'Bearer client-fixture','chatgpt-account-id':'account-fixture',
+    'x-api-key':'api-fixture','openai-organization':'org-fixture','openai-project':'project-fixture',
+    cookie:'session=fixture',cookie2:'session2=fixture'};
+  const headers={...credentials,'x-caveman-gateway-key':key,'content-type':'application/json',
+    'x-openai-subagent':'collab_spawn','x-codex-turn-metadata':'{"subagent_kind":"thread_spawn"}'};
+  const body=JSON.stringify({input:'서버 인증 검증',stream:true});
+  const routes=[
+    ['POST','/v1/responses','on',8787,'/compat/opencodex/v1/responses'],
+    ['POST','/v1/responses','off',10101,'/v1/responses'],
+    ...['images/generations','images/edits','alpha/search','responses/compact']
+      .map(p=>['POST','/v1/'+p,'on',10101,'/v1/'+p]),
+    ['GET','/v1/models?client_version=fixture','on',10101,'/v1/models?client_version=fixture'],
+  ];
+  for(const [method,url,compression,port,upstreamPath] of routes){
+    const response=await fetch(f.url+url,{method,headers:{...headers,'x-caveman-compression':compression},
+      ...(method==='POST'?{body}:{})});
+    assert.equal(response.status,200);
+    assert.equal(response.headers.get('content-type'),'text/event-stream');
+    assert.equal(await response.text(),'data: first\n\ndata: done\n\n');
+    const request=f.seen.at(-1);
+    assert.equal(f.ports.at(-1),port);assert.equal(request.url,upstreamPath);
+    assert.equal(request.body,method==='POST'?body:'');
+    for(const name of [...Object.keys(credentials),'x-caveman-gateway-key','x-caveman-compression'])
+      assert.equal(request.headers[name],undefined,`${method} ${url}: ${name}`);
+    for(const name of ['x-openai-subagent','x-codex-turn-metadata'])
+      assert.equal(request.headers[name],headers[name]);
+  }
+  const info=await fetch(f.url+'/v1/stack-info',{headers}).then(r=>r.json());
+  assert.equal(info.clientAuthMode,'server');assert.equal(info.capabilities.compressionSwitch,true);
+  const count=f.seen.length;
+  for(const [method,url] of routes){
+    const response=await fetch(f.url+url,{method,headers:credentials,...(method==='POST'?{body}:{})});
+    assert.equal(response.status,401);await response.text();
+  }
+  assert.equal((await fetch(f.url+'/v1/stack-info',{headers:credentials})).status,401);
+  assert.equal(f.seen.length,count);
+});
+
+test('forward mode remains the default and explicitly preserves client authentication',async t=>{
+  const headers={authorization:'Bearer client-fixture','chatgpt-account-id':'account-fixture',
+    'x-api-key':'api-fixture','openai-organization':'org-fixture','openai-project':'project-fixture',
+    cookie:'session=fixture','x-caveman-gateway-key':key};
+  for(const options of [{},{clientAuthMode:'forward'}]){
+    const f=await fixture(t,1024,options);
+    const response=await fetch(f.url+'/v1/responses',{method:'POST',headers,body:'{}'});
+    assert.equal(response.status,200);await response.text();
+    for(const [name,value] of Object.entries(headers))
+      assert.equal(f.seen[0].headers[name],name==='x-caveman-gateway-key'?undefined:value);
+    const info=await fetch(f.url+'/v1/stack-info',{headers}).then(r=>r.json());
+    assert.equal(info.clientAuthMode,'forward');
+  }
 });
 
 test('authenticated compression selection routes per request and never forwards the control header',async t=>{

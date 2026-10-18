@@ -15,10 +15,10 @@ import tempfile
 import urllib.request
 import uuid
 
-PACKAGES={'caveman':'@caveman-ai/cli','opencodex':'@bitkyc08/opencodex'}
+PACKAGES={'caveman':'@caveman-ai/cli','opencodex':'@bitkyc08/opencodex','codex':'@openai/codex'}
 
 def validate(payload):
-    if not isinstance(payload,dict) or payload.get('action') not in ('check','catalog','update'):
+    if not isinstance(payload,dict) or payload.get('action') not in ('status','check','catalog','update'):
         raise ValueError('INVALID_OPERATION')
     repo=Path(payload.get('repo',''))
     if not repo.is_absolute() or not (repo/'stack').is_file() or not (repo/'package-lock.json').is_file():
@@ -42,11 +42,24 @@ def registry(package):
     return version
 
 def execute(payload):
-    repo=validate(payload);stack=load_stack(repo);config=stack.config()
+    repo=validate(payload)
+    if payload['action']=='status':
+        # Poll only the fixed, persisted mode; never load the stack, query an
+        # account or disclose any other configuration fields to the browser.
+        authentication={'mode':'unknown','source':'unavailable'}
+        try:
+            persisted=json.loads((repo/'data/state/opencodex/config.json').read_text())
+            mode=persisted['providers']['openai']['codexAccountMode']
+            if mode in ('pool','direct'):
+                authentication={'mode':mode,'source':'server'}
+        except (OSError,UnicodeError,ValueError,KeyError,TypeError):
+            pass
+        return {'ok':True,'authentication':authentication}
+    stack=load_stack(repo);config=stack.config()
     package=json.loads((repo/'package.json').read_text())
     def installed_versions():
         running=stack.pod('exec',stack.name(config),'node','--input-type=module','-e',
-            "import fs from 'node:fs';console.log(JSON.stringify(Object.fromEntries(['@caveman-ai/cli','@bitkyc08/opencodex'].map(n=>[n,JSON.parse(fs.readFileSync('/app/node_modules/'+n+'/package.json')).version]))))",
+            "import fs from 'node:fs';console.log(JSON.stringify(Object.fromEntries("+json.dumps(list(PACKAGES.values()))+".map(n=>[n,JSON.parse(fs.readFileSync('/app/node_modules/'+n+'/package.json')).version]))))",
             capture_output=True,text=True)
         return json.loads(running.stdout)
     def runtime_manifests():

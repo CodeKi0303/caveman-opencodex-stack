@@ -55,8 +55,26 @@ def image_id(c):
     p=ROOT/'data/active-image'
     return p.read_text().strip() if p.exists() else c['IMAGE']
 
+def image_exists(image):
+    result=pod('image','exists',image,check=False,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    if result.returncode not in (0,1):raise RuntimeError('Could not inspect the local image store')
+    return result.returncode==0
+
+def up(c):
+    if exists(name(c)):raise RuntimeError('Container already exists; use status or down first')
+    # Fresh clones need no prebuilt application image or host npm. Existing
+    # installs and explicit `build` users keep the image they already selected.
+    if not (ROOT/'data/active-image').exists() and not image_exists(c['IMAGE']):
+        install_latest(c)
+        return
+    launch(c);catalog(c)
+    ident=pod('image','inspect',image_id(c),'--format','{{.Id}}',capture_output=True,text=True).stdout.strip()
+    (ROOT/'data/active-image').write_text(ident+'\n');print('Stack ready')
+
 def runtime_env(c):
-    allowed={'HTTP_PROXY','HTTPS_PROXY','NO_PROXY','ALLOWED_CIDRS','MAX_REQUEST_BYTES','CAVEMAN_MODE','GATEWAY_TLS_CERT','GATEWAY_TLS_KEY'}
+    if c.get('CLIENT_AUTH_MODE','forward') not in ('forward','server'):
+        raise RuntimeError('CLIENT_AUTH_MODE must be forward or server')
+    allowed={'HTTP_PROXY','HTTPS_PROXY','NO_PROXY','ALLOWED_CIDRS','MAX_REQUEST_BYTES','CAVEMAN_MODE','CLIENT_AUTH_MODE','GATEWAY_TLS_CERT','GATEWAY_TLS_KEY'}
     return [a for k,v in c.items() if k in allowed and v for a in ['--env',k+'='+v]]
 
 def build_env(c):
@@ -190,6 +208,14 @@ def update(c,context=None):
 
 LATEST_PACKAGES=('@caveman-ai/cli','@bitkyc08/opencodex','@openai/codex')
 
+def resolver_image(stage):
+    # Resolve with the same pinned Node base as the build, even before any
+    # application image exists. Never pull a floating resolver image tag.
+    source=(Path(stage)/'Containerfile').read_text()
+    match=re.search(r'^FROM\s+(docker\.io/library/node:\d+\.\d+\.\d+-[a-z0-9.-]+)\s*$',source,re.MULTILINE)
+    if not match:raise RuntimeError('Containerfile must declare a pinned Node base image for dependency resolution')
+    return match.group(1)
+
 def stage_source(target):
     # A separate build context keeps repeat Git updates clean and never copies private state.
     excluded={'.git','node_modules','data','backups','secrets','certs','exports','__pycache__'}
@@ -232,6 +258,7 @@ for(const [name,version] of Object.entries(versions)){
 }
 console.log(JSON.stringify(versions));
 '''
+    image=resolver_image(stage)
     extra=[];ca=bundle_ca()
     if ca:extra=['--volume',str(ca)+':/tmp/company-ca.pem:ro,z','--env','NODE_EXTRA_CA_CERTS=/tmp/company-ca.pem']
     proxy=[a for key in ('HTTP_PROXY','HTTPS_PROXY','NO_PROXY') if build_env(c).get(key) for a in ('--env',key)]
@@ -240,7 +267,7 @@ console.log(JSON.stringify(versions));
         result=pod('run','--rm','--name',container,'--label','io.caveman-stack.resolver='+owner,
             '--network',c.get('BUILD_NETWORK','slirp4netns'),
             '--volume',str(stage)+':/work:Z','--workdir','/work',*proxy,*extra,
-            '--entrypoint','node',image_id(c),'-e',script,json.dumps(LATEST_PACKAGES),
+            '--entrypoint','node',image,'-e',script,json.dumps(LATEST_PACKAGES),
             env=build_env(c),capture_output=True,text=True,timeout=300)
     finally:
         # Killing a timed-out Podman client does not stop its container. Remove our owned
@@ -253,11 +280,40 @@ console.log(JSON.stringify(versions));
         raise RuntimeError('Latest dependency resolution returned an invalid result')
     return versions
 
-def update_latest(c):
-    if shutil.disk_usage(ROOT).free<4*1024**3:raise RuntimeError('At least 4 GiB free disk space is required for an update')
+def install(c,context):
+    """Build and start an initial release without replacing any installed image."""
+    if exists(name(c)) or (ROOT/'data/active-image').exists():
+        raise RuntimeError('A stack is already installed; use ./stack update --latest')
+    tag=c['IMAGE'].rsplit(':',1)[0]+':install-'+secrets.token_hex(8)
+    build(c,tag,context=context)
+    candidate=pod('image','inspect',tag,'--format','{{.Id}}',capture_output=True,text=True).stdout.strip()
+    state=ROOT/'data/state'
+    had_state=state.exists()
+    # A retry or imported private state may already exist, even on a fresh
+    # checkout. Preserve it if startup or catalog validation fails.
+    with tempfile.TemporaryDirectory(prefix='install-state-',dir=ROOT/'data') as temporary:
+        before=Path(temporary)/'state'
+        if had_state:copy_state(state,before)
+        try:
+            launch(c,candidate);catalog(c)
+            (ROOT/'data/active-image').write_text(candidate+'\n')
+        except BaseException:
+            (ROOT/'data/active-image').unlink(missing_ok=True)
+            down(c)
+            if state.exists():state.rename(ROOT/'data'/('failed-install-'+secrets.token_hex(8)))
+            if had_state:copy_state(before,state)
+            raise
+    print('Stack ready')
+
+def install_latest(c):return apply_latest(c,'install')
+
+def update_latest(c):return apply_latest(c,'update')
+
+def apply_latest(c,operation):
+    if shutil.disk_usage(ROOT).free<4*1024**3:raise RuntimeError('At least 4 GiB free disk space is required for installation or update')
     release=ROOT/'data/releases'/(time.strftime('%Y%m%d-%H%M%S')+'-'+secrets.token_hex(4))
     release.mkdir(parents=True,mode=0o700)
-    metadata={'status':'resolving','packages':list(LATEST_PACKAGES)}
+    metadata={'status':'resolving','operation':operation,'packages':list(LATEST_PACKAGES)}
     try:
         metadata['sourceCommit']=run(['git','-C',str(ROOT),'rev-parse','HEAD'],capture_output=True,text=True).stdout.strip()
         metadata['sourceModified']=bool(run(['git','-C',str(ROOT),'status','--porcelain','--untracked-files=normal'],capture_output=True,text=True).stdout.strip())
@@ -266,13 +322,14 @@ def update_latest(c):
     record()
     applied=False
     try:
-        with tempfile.TemporaryDirectory(prefix='update-build-',dir=ROOT/'data') as temporary:
+        with tempfile.TemporaryDirectory(prefix=operation+'-build-',dir=ROOT/'data') as temporary:
             stage=Path(temporary)/'source';stage_source(stage)
             versions=resolve_latest(c,stage)
             for filename in ('package.json','package-lock.json'):shutil.copy2(stage/filename,release/filename)
             metadata.update(status='validating',versions=versions);record()
             print('Resolved latest stable runtime versions:',json.dumps(versions,sort_keys=True),flush=True)
-            update(c,context=stage)
+            if operation=='install':install(c,context=stage)
+            else:update(c,context=stage)
             applied=True
         metadata.update(status='applied',image=image_id(c));record()
         print('Exact release manifests:',release)
@@ -281,7 +338,7 @@ def update_latest(c):
         metadata['status']='applied-record-error' if applied else 'failed'
         try:record()
         except OSError:pass
-        if applied:raise RuntimeError('Update was applied, but release bookkeeping failed. Check the running image before retrying.')
+        if applied:raise RuntimeError(('Installation' if operation=='install' else 'Update')+' was applied, but release bookkeeping failed. Check the running image before retrying.')
         raise
 
 def git_update(lock):
@@ -326,7 +383,7 @@ def main():
         for k in ['gateway-key','admin-key']:
             p=ROOT/'secrets'/k
             if not p.exists():p.write_text(secrets.token_hex(32)+'\n');p.chmod(0o600)
-        print('Initialized .env and private keys. Edit .env, then ./stack build && ./stack up');return
+        print('Initialized .env and private keys. Edit .env, then ./stack up (first install resolves latest stable packages)');return
     c=config()
     if args.command=='mcp':
         os.execvp('podman',['podman','exec','-i',name(c),'/opt/caveman/bin/caveman-mcp'])
@@ -335,10 +392,7 @@ def main():
     with operation_lock(args.operation_lock_fd) as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         if args.command=='build':build(c)
-        elif args.command=='up':
-            launch(c);catalog(c)
-            ident=pod('image','inspect',image_id(c),'--format','{{.Id}}',capture_output=True,text=True).stdout.strip()
-            (ROOT/'data/active-image').write_text(ident+'\n');print('Stack ready')
+        elif args.command=='up':up(c)
         elif args.command=='down':down(c)
         elif args.command=='catalog':catalog(c)
         elif args.command=='account-mode':account_mode(c,args.path)

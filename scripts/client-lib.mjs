@@ -13,6 +13,8 @@ const read=file=>fs.existsSync(file)?fs.readFileSync(file):null;
 const jsonRead=file=>{try{return JSON.parse(fs.readFileSync(file,'utf8'));}catch{return null;}};
 const normalized=catalog=>JSON.stringify(catalog,null,2)+'\n';
 const commands=['configure','reconfigure','sync','doctor','export'];
+const clientCredentialHeaders=new Set(['authorization','chatgpt-account-id','x-api-key','openai-organization','openai-project','cookie','cookie2']);
+const providerClientAuthMode=(config,id)=>id!=='openai'&&config.model_providers?.[id]?.requires_openai_auth===false?'server':'forward';
 
 export function validateCatalog(value) {
   if(!value || typeof value!=='object' || Array.isArray(value) || !Array.isArray(value.models) || value.models.length===0)
@@ -50,9 +52,10 @@ function keyIn(headers) {
 function hasGatewayEnvHeader(headers) {
   return !!headers&&typeof headers==='object'&&Object.keys(headers).some(name=>name.toLowerCase()==='x-caveman-gateway-key');
 }
-function connectionReport(config,base,key,providerOverride,bridgeUrl) {
+function connectionReport(config,base,key,providerOverride,bridgeUrl,requestedClientAuthMode) {
   const effective=effectiveConfig(config), id=providerOverride??effective.provider;
   const provider=config.model_providers?.[id],mcp=config.mcp_servers?.caveman,warnings=[];
+  const clientAuthMode=providerClientAuthMode(config,id);
   if(id==='openai') {
     if(provider)warnings.push('reserved_openai_provider_override');
     if(!bridgeUrl||!endpointEquals(config.openai_base_url,bridgeUrl))warnings.push('openai_bridge_url_mismatch');
@@ -63,9 +66,11 @@ function connectionReport(config,base,key,providerOverride,bridgeUrl) {
     if(keyIn(provider?.http_headers)!==key)warnings.push('provider_gateway_key_mismatch');
     if(hasGatewayEnvHeader(provider?.env_http_headers))warnings.push('provider_gateway_env_header_conflict');
     if(provider?.wire_api!=='responses')warnings.push('provider_wire_api_mismatch');
-    if(provider?.requires_openai_auth!==true)warnings.push('provider_auth_mode_mismatch');
+    if(typeof provider?.requires_openai_auth!=='boolean'||(requestedClientAuthMode&&requestedClientAuthMode!==clientAuthMode))warnings.push('provider_auth_mode_mismatch');
     if(provider?.supports_websockets!==false)warnings.push('provider_websockets_not_disabled');
     if(provider?.env_key||provider?.experimental_bearer_token)warnings.push('provider_has_additional_auth_override');
+    if(clientAuthMode==='server'&&['http_headers','env_http_headers'].some(field=>
+      Object.keys(provider?.[field]??{}).some(name=>clientCredentialHeaders.has(name.toLowerCase()))))warnings.push('provider_has_client_auth_headers');
   }
   const compression=(effective.profile?config.profiles?.[effective.profile]?.features?.enable_request_compression:undefined)??config.features?.enable_request_compression;
   if(compression!==false)warnings.push('request_compression_not_disabled');
@@ -73,12 +78,13 @@ function connectionReport(config,base,key,providerOverride,bridgeUrl) {
   if(keyIn(mcp?.http_headers)!==key)warnings.push('mcp_gateway_key_mismatch');
   if(hasGatewayEnvHeader(mcp?.env_http_headers))warnings.push('mcp_gateway_env_header_conflict');
   if(providerOverride&&providerOverride!==effective.provider)warnings.push('updated_provider_is_not_selected');
-  return {provider:id,selectedProvider:effective.provider,profile:effective.profile,warnings};
+  return {provider:id,selectedProvider:effective.provider,profile:effective.profile,clientAuthMode,warnings};
 }
 
-function configuredText(original,config,command,base,key,target,requestedProvider,bridgeUrl) {
+function configuredText(original,config,command,base,key,target,requestedProvider,bridgeUrl,requestedClientAuthMode) {
   const effective=effectiveConfig(config);
   const id=requestedProvider??(command==='reconfigure'?effective.provider:'caveman_stack');
+  const clientAuthMode=requestedClientAuthMode??providerClientAuthMode(config,id);
   if(typeof id!=='string'||!/^[A-Za-z0-9_-]{1,80}$/.test(id))fail('INVALID_PROVIDER','Provider ID must contain only letters, digits, underscores or hyphens.');
   if(command==='reconfigure'&&id!=='openai'&&!config.model_providers?.[id])fail('PROVIDER_NOT_FOUND','The selected provider is not configured. Use configure for a new provider or specify --provider.');
   const changes=[],removePrefixes=[];
@@ -99,7 +105,12 @@ function configuredText(original,config,command,base,key,target,requestedProvide
       removePrefixes.push(p);
     } else {
       if(!config.model_providers?.[id]?.name)set([...p,'name'],'Caveman + OpenCodex');
-      for(const [k,v] of Object.entries({base_url:base,wire_api:'responses',requires_openai_auth:true,supports_websockets:false}))set([...p,k],v);
+      for(const [k,v] of Object.entries({base_url:base,wire_api:'responses',requires_openai_auth:clientAuthMode==='forward',supports_websockets:false}))set([...p,k],v);
+      if(clientAuthMode==='server') {
+        for(const name of ['env_key','experimental_bearer_token'])set([...p,name],REMOVE);
+        for(const field of ['http_headers','env_http_headers'])for(const name of Object.keys(at(config,[...p,field])??{}))
+          if(clientCredentialHeaders.has(name.toLowerCase()))set([...p,field,name],REMOVE);
+      }
     }
     for(const parent of id==='openai'?[m]:[p,m]) {
       for(const existing of Object.keys(at(config,[...parent,'http_headers'])??{}))
@@ -112,7 +123,7 @@ function configuredText(original,config,command,base,key,target,requestedProvide
     for(const legacy of ['command','args','cwd','env_vars'])set([...m,legacy],REMOVE);
     removePrefixes.push([...m,'env']);
   }
-  return {text:patchConfig(original,changes,removePrefixes),provider:id};
+  return {text:patchConfig(original,changes,removePrefixes),provider:id,clientAuthMode};
 }
 
 function atomic(file,bytes) {
@@ -219,14 +230,18 @@ async function inspectBridge(url,base,fetchFn) {
 function parseArgs(argv) {
   const [command,...args]=argv;
   if(command==='--help'||command==='help')return {help:true};
-  if(!commands.includes(command))fail('USAGE','Usage: client.mjs configure|reconfigure|sync|doctor|export --url http(s)://host:port/v1 --key-file FILE [--codex-home DIR] [--provider ID] [--bridge-url http://127.0.0.1:PORT/v1] [--output FILE] [--auth-file FILE]');
-  const allowed=new Set(['url','key-file','codex-home','provider','bridge-url','output','auth-file']),opts={};
+  if(!commands.includes(command))fail('USAGE','Usage: client.mjs configure|reconfigure|sync|doctor|export --url http(s)://host:port/v1 --key-file FILE [--codex-home DIR] [--provider ID] [--bridge-url http://127.0.0.1:PORT/v1] [--client-auth-mode forward|server] [--output FILE] [--auth-file FILE]');
+  const allowed=new Set(['url','key-file','codex-home','provider','bridge-url','client-auth-mode','output','auth-file']),opts={};
   for(let i=0;i<args.length;i+=2) {
     const name=args[i]?.slice(2);
     if(!args[i]?.startsWith('--')||!allowed.has(name)||!args[i+1]||args[i+1].startsWith('--')||name in opts)fail('USAGE','Expected supported --name value options, with no duplicates.');
     opts[name]=args[i+1];
   }
   if(!opts['key-file'])fail('USAGE','--key-file is required.');
+  if(opts['client-auth-mode']!==undefined&&!['forward','server'].includes(opts['client-auth-mode']))
+    fail('INVALID_CLIENT_AUTH_MODE','--client-auth-mode must be forward or server.');
+  if(opts['client-auth-mode']==='server'&&opts['auth-file'])
+    fail('CLIENT_AUTH_MODE_CONFLICT','Server authentication mode cannot be combined with --auth-file. Use only the gateway key.');
   return {command,opts};
 }
 
@@ -236,7 +251,7 @@ export async function runClient(argv,{fetchFn=fetch}={}) {
 }
 async function execute(argv,fetchFn) {
   const parsed=parseArgs(argv);
-  if(parsed.help)return {ok:true,commands,options:['--url','--key-file','--codex-home','--provider','--bridge-url','--output','--auth-file'],sync:'Catalog and ETag metadata only; unchanged catalog and metadata produce no writes or backups.',reconfigure:'Updates one existing provider (selected provider by default) and HTTP MCP; does not switch another selected provider.',openai:'Use configure --provider openai --bridge-url http://127.0.0.1:PORT/v1 after starting the native bridge. --url remains the authenticated remote gateway for catalog and MCP.'};
+  if(parsed.help)return {ok:true,commands,options:['--url','--key-file','--codex-home','--provider','--bridge-url','--client-auth-mode','--output','--auth-file'],sync:'Catalog and ETag metadata only; unchanged catalog and metadata produce no writes or backups.',reconfigure:'Updates one existing provider (selected provider by default) and HTTP MCP; preserves its client authentication mode unless explicitly selected.',clientAuthMode:'Custom providers support forward (client login) or server (gateway key only). Built-in openai keeps its local login and uses the native bridge authentication policy.',openai:'Use configure --provider openai --bridge-url http://127.0.0.1:PORT/v1 after starting the native bridge. --url remains the authenticated remote gateway for catalog and MCP.'};
   const {command,opts}=parsed,base=apiBase(opts.url||'http://127.0.0.1:18787/v1');
   let key;
   try {key=fs.readFileSync(opts['key-file'],'utf8').trim();}catch{fail('KEY_FILE_UNREADABLE','Cannot read the gateway key file.');}
@@ -250,6 +265,12 @@ async function execute(argv,fetchFn) {
   const preserveNative=command==='configure'&&effectiveConfig(config).provider==='openai'&&Boolean(config.openai_base_url);
   const requestedProvider=opts.provider??(command==='configure'&&(opts['bridge-url']||preserveNative)?'openai':undefined);
   const provider=requestedProvider??(command==='configure'?'caveman_stack':effectiveConfig(config).provider);
+  const requestedClientAuthMode=opts['client-auth-mode'];
+  if(provider==='openai'&&requestedClientAuthMode==='server'&&command!=='export')
+    fail('CLIENT_AUTH_MODE_PROVIDER_MISMATCH','The built-in openai provider keeps its local login for Remote. Configure server authentication in the native bridge instead.');
+  const clientAuthMode=requestedClientAuthMode??providerClientAuthMode(config,provider);
+  if(clientAuthMode==='server'&&opts['auth-file'])
+    fail('CLIENT_AUTH_MODE_CONFLICT','Server authentication mode cannot be combined with --auth-file. Use only the gateway key.');
   let bridgeUrl;
   if(opts['bridge-url']) {
     if(provider!=='openai')fail('BRIDGE_PROVIDER_MISMATCH','--bridge-url requires the built-in openai provider.');
@@ -259,26 +280,27 @@ async function execute(argv,fetchFn) {
   }
   if((command==='configure'||command==='reconfigure')&&provider==='openai'&&!bridgeUrl)
     fail('BRIDGE_URL_MISSING','--bridge-url is required to configure the built-in openai provider. Start the native bridge before changing the client.');
-  const report=connectionReport(config,base,key,requestedProvider,bridgeUrl);
+  const report=connectionReport(config,base,key,requestedProvider,bridgeUrl,requestedClientAuthMode);
   let auth;
   if(opts['auth-file']) {auth=jsonRead(opts['auth-file']);if(!auth)fail('AUTH_FILE_INVALID','The supplied auth file is unreadable or invalid.');}
   if(command==='doctor') {
     let remote;
     try {const result=await catalogRequest(base,key,undefined,local,metadata,fetchFn,false);remote={ok:true,models:result.catalog.models.length,notModified:result.notModified};}
     catch(error){remote={ok:false,error:error instanceof ClientError?error.code:'CATALOG_UNAVAILABLE'};}
-    const mcp=await inspectMcp(mcpUrl(base),key,fetchFn),authState=authMetadata(opts['auth-file']||path.join(home,'auth.json'));
+    const mcp=await inspectMcp(mcpUrl(base),key,fetchFn),authState={...authMetadata(opts['auth-file']||path.join(home,'auth.json')),
+      required:report.provider==='openai'||report.clientAuthMode!=='server'};
     const bridge=report.provider==='openai'?await inspectBridge(bridgeUrl,base,fetchFn):undefined;
     const catalogReference=effectiveConfig(config).catalog;
     const refMatches=typeof catalogReference==='string'&&path.resolve(home,catalogReference)===catalogFile;
     const warnings=[...report.warnings];
     if(!local)warnings.push('local_catalog_invalid_or_missing');
     if(!refMatches)warnings.push('catalog_reference_mismatch');
-    if(!authState.usable)warnings.push(authState.status);
-    return {ok:warnings.length===0&&remote.ok&&mcp.ok&&(!bridge||bridge.ok),command,provider:report.provider,selectedProvider:report.selectedProvider,profile:report.profile,warnings,catalog:{localValid:!!local,referenceMatches:refMatches,...remote},auth:authState,mcp,bridge,restartNotice:'Existing Codex processes or resumed chats may retain old provider settings. This command does not restart them.'};
+    if(authState.required&&!authState.usable)warnings.push(authState.status);
+    return {ok:warnings.length===0&&remote.ok&&mcp.ok&&(!bridge||bridge.ok),command,provider:report.provider,selectedProvider:report.selectedProvider,profile:report.profile,clientAuthMode:report.clientAuthMode,warnings,catalog:{localValid:!!local,referenceMatches:refMatches,...remote},auth:authState,mcp,bridge,restartNotice:'Existing Codex processes or resumed chats may retain old provider settings. This command does not restart them.'};
   }
   let configured=null;
   if(command==='configure'||command==='reconfigure') {
-    configured=configuredText(cfgBefore?.toString('utf8')??'',config,command,base,key,catalogFile,requestedProvider,bridgeUrl);
+    configured=configuredText(cfgBefore?.toString('utf8')??'',config,command,base,key,catalogFile,requestedProvider,bridgeUrl,requestedClientAuthMode);
     if(configured.provider==='openai') {
       const bridge=await inspectBridge(bridgeUrl,base,fetchFn);
       if(!bridge.ok)fail(bridge.error,'The native OpenAI bridge is not ready or targets another gateway. Start the matching bridge before changing the client. Existing files were kept.');
@@ -289,7 +311,7 @@ async function execute(argv,fetchFn) {
   if(command==='export') {
     const output=path.resolve(opts.output||'/state/catalog/models.json'),before=read(output),changed=before===null||!before.equals(Buffer.from(data));
     if(changed){fs.mkdirSync(path.dirname(output),{recursive:true,mode:0o700});atomic(output,data);}
-    return {ok:true,command,changed,catalog:output,models:fetched.catalog.models.filter(m=>m.visibility==='list').map(m=>m.slug)};
+    return {ok:true,command,changed,catalog:output,clientAuthMode,models:fetched.catalog.models.filter(m=>m.visibility==='list').map(m=>m.slug)};
   }
   const metaAfter=JSON.stringify({url:base,etag:fetched.etag,catalogSha256:digest(data)})+'\n';
   const planned=[{file:metaFile,before:metaBefore,after:metaAfter}];
@@ -305,12 +327,12 @@ async function execute(argv,fetchFn) {
   }
   if(command==='sync'&&!catalogChanged) {
     const backup=commitFiles(home,planned);
-    return {ok:true,command,changed:backup!==null,catalogChanged:false,notModified:fetched.notModified,catalog:catalogFile,backup,warnings:report.warnings,restartCodex:false};
+    return {ok:true,command,changed:backup!==null,catalogChanged:false,notModified:fetched.notModified,catalog:catalogFile,clientAuthMode:report.clientAuthMode,backup,warnings:report.warnings,restartCodex:false};
   }
   // Backward-compatible first sync installs only the local catalog reference.
   // It never changes provider endpoints, gateway headers, MCP or credentials.
   const nextConfig=configured?.text??configuredText(cfgBefore?.toString('utf8')??'',config,'sync',base,key,catalogFile,requestedProvider,bridgeUrl).text;
   planned.push({file:cfgFile,before:cfgBefore,after:nextConfig});
-  const backup=commitFiles(home,planned),afterReport=connectionReport(parseConfig(nextConfig),base,key,configured?.provider??requestedProvider,bridgeUrl);
-  return {ok:true,command,changed:backup!==null,catalogChanged,catalog:catalogFile,provider:configured?.provider??report.provider,selectedProvider:afterReport.selectedProvider,mcp:command==='sync'?undefined:mcpUrl(base),backup,warnings:afterReport.warnings,restartCodex:catalogChanged||nextConfig!==(cfgBefore?.toString('utf8')??'')};
+  const backup=commitFiles(home,planned),afterReport=connectionReport(parseConfig(nextConfig),base,key,configured?.provider??requestedProvider,bridgeUrl,requestedClientAuthMode);
+  return {ok:true,command,changed:backup!==null,catalogChanged,catalog:catalogFile,provider:configured?.provider??report.provider,selectedProvider:afterReport.selectedProvider,clientAuthMode:afterReport.clientAuthMode,mcp:command==='sync'?undefined:mcpUrl(base),backup,warnings:afterReport.warnings,restartCodex:catalogChanged||nextConfig!==(cfgBefore?.toString('utf8')??'')};
 }

@@ -15,6 +15,8 @@ function validateLimit(value) {
 const deniedHeaders = new Set(['connection','keep-alive','proxy-authenticate','proxy-authorization',
   'te','trailer','transfer-encoding','upgrade','host','x-caveman-gateway-key','x-caveman-compression',
   'forwarded','x-forwarded-for','x-forwarded-host','x-forwarded-proto']);
+const clientAuthHeaders = ['authorization','chatgpt-account-id','x-api-key',
+  'openai-organization','openai-project','cookie','cookie2'];
 export function addressPolicy(cidrs = '') {
   if (!cidrs.trim()) return () => true;
   const list = new BlockList();
@@ -44,9 +46,10 @@ export function requestMetadata(req) {
     account_id_present:typeof req.headers['chatgpt-account-id'] === 'string',
     gateway_key_present:typeof req.headers['x-caveman-gateway-key'] === 'string'};
 }
-export function createGateway({key, request = http.request, audit = () => {}, maxRequestBytes = MAX_REQUEST_BYTES, allowedAddress = addressPolicy(), tls, catalogPath, recoveryMcp} = {}) {
+export function createGateway({key, request = http.request, audit = () => {}, maxRequestBytes = MAX_REQUEST_BYTES, allowedAddress = addressPolicy(), tls, catalogPath, recoveryMcp, clientAuthMode = 'forward'} = {}) {
   validateLimit(maxRequestBytes);
   if (typeof key !== 'string' || key.length < 32) throw Error('Gateway key must be at least 32 characters');
+  if (!['forward','server'].includes(clientAuthMode)) throw Error('Invalid client authentication mode');
   let recovery = recoveryMcp;
   let recoveryLoading;
   let recoveryClosed = false;
@@ -69,7 +72,7 @@ export function createGateway({key, request = http.request, audit = () => {}, ma
         !timingSafeEqual(Buffer.from(supplied),Buffer.from(key))) return sendError(res,401,'Gateway key required');
     if(req.method==='GET'&&req.url==='/v1/stack-info') {
       res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'}).end(JSON.stringify({
-        service:'caveman-lan-gateway',capabilities:{compressionSwitch:true}}));return;
+        service:'caveman-lan-gateway',capabilities:{compressionSwitch:true},clientAuthMode}));return;
     }
     if (req.url === '/mcp') {
       if (recoveryClosed) return sendError(res,503,'Recovery is shutting down');
@@ -141,8 +144,19 @@ export function createGateway({key, request = http.request, audit = () => {}, ma
       return sendError(res,400,'Invalid Content-Length');
     if (length !== null && length > maxRequestBytes) return tooLarge('content-length');
     let rejected = false;
+    const upstreamHeaders = cleanHeaders(req.headers);
+    // In server mode OpenCodex selects its stored account after compression.
+    // Client credentials must reach neither Caveman nor a direct tool route.
+    if (clientAuthMode === 'server') {
+      for (const name of Object.keys(upstreamHeaders)) {
+        if (clientAuthHeaders.includes(name.toLowerCase())) delete upstreamHeaders[name];
+      }
+    }
+    metadata.client_auth_mode = clientAuthMode;
+    metadata.forwarded_authorization_present = typeof upstreamHeaders.authorization === 'string';
+    metadata.forwarded_account_id_present = typeof upstreamHeaders['chatgpt-account-id'] === 'string';
     const upstream = request({hostname:'127.0.0.1',port,path:upstreamPath,method:req.method,
-      headers:cleanHeaders(req.headers)}, response => {
+      headers:upstreamHeaders}, response => {
       if (rejected || res.destroyed || res.writableEnded) { response.destroy(); return; }
       metadata.upstream_status = response.statusCode ?? 502;
       res.writeHead(response.statusCode ?? 502, cleanHeaders(response.headers));
@@ -196,6 +210,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     key:readFileSync('/run/secrets/gateway-key','utf8').trim(),
     allowedAddress:addressPolicy(process.env.ALLOWED_CIDRS || ''),tls,
     catalogPath:'/state/catalog/models.json',
+    clientAuthMode:process.env.CLIENT_AUTH_MODE ?? 'forward',
     audit:record=>console.log(JSON.stringify(record))
   });
   server.listen(8080,'0.0.0.0');

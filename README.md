@@ -12,7 +12,7 @@ Windows/WSL Codex는 HTTP(S)로 접속하므로 작업 파일과 도구 실행�
 
 ```text
 Windows / WSL / Linux Codex (본인의 로그인 유지)
-    │ 게이트웨이 키 + 기존 모델 인증
+    │ 게이트웨이 키 + 기존 모델 인증 (server 모드는 게이트웨이 키만)
     ▼
 호스트 <서버 LAN IP>:18787 (기본 LAN 공개, TLS 설정 가능)
     │ Podman 컨테이너 내부 :8080
@@ -30,10 +30,14 @@ OpenCodex → 본인의 계정 풀에서 사용 가능한 계정 선택 → 제�
 ```
 
 두 프로젝트를 fork하거나 소스를 복사해 합치지 않습니다. 이 저장소는 연결 코드·운영 명령만 관리하며,
-빌드할 때 `package-lock.json`으로 고정된 upstream 패키지를 설치합니다.
-현재 고정 버전은 Node.js **24.21.0**, Bun **1.4.3**, OpenCodex **2.84.0**,
+**최초 서버 설치는 Caveman CLI·OpenCodex·Pod의 Codex CLI를 npm `latest`의 최신 안정 버전으로 설치합니다.**
+설치 시 정확한 버전과 `package-lock.json`을 생성한 뒤 빌드하며, 결과를 `data/releases/`에 보관합니다.
+재시작은 설치된 이미지를 그대로 사용합니다. 최신 조회 실패 시 예전 버전으로 대신 설치하지 않습니다.
+
+재현용 Git 고정 버전은 Node.js **24.21.0**, Bun **1.4.3**, OpenCodex **2.84.0**,
 Caveman CLI **4.0.1**, Codex CLI **0.162.1**, MCP SDK **1.32.1**입니다.
-Caveman companion 바이너리는 해당 CLI의 서명 검증 설치기가 선택합니다(이 버전: `bin-v4.0.1`).
+`./stack build`는 이 고정 manifest로 명시적으로 빌드할 때 사용합니다.
+Caveman companion 바이너리는 선택된 CLI의 서명 검증 설치기가 결정합니다(고정 버전: `bin-v4.0.1`).
 직접 실행하는 Bun은 별도로 고정하며, 나머지 간접 의존성은 upstream의 호환 범위 안에서 갱신합니다.
 이 서버의 기존 네이티브 설치와 데이터는 사용하거나 변경하지 않습니다.
 
@@ -84,18 +88,19 @@ git clone https://github.com/CodeKi0303/caveman-opencodex-stack.git caveman-podm
 cd caveman-podman
 ./stack init
 # 필요하면 .env와 certs/ 설정: 아래 회사망 안내 참고
-./stack build
-./stack up
+./stack up                    # 최초: 세 패키지 latest 조회 → 빌드 → 준비 상태·카탈로그 검사
 ./stack status
 ```
 
 `init`은 `.env`, `secrets/gateway-key`, `secrets/admin-key`를 생성합니다. 기존 키는 덮어쓰지 않습니다.
-`up`은 프록시의 준비 상태를 확인하고 공통 카탈로그를 생성합니다.
+설치 이미지와 활성 이미지 기록이 없는 첫 `up`은 세 패키지의 최신 안정 버전을 설치합니다.
+기존 이미지가 있으면 그대로 사용하고 프록시의 준비 상태를 확인한 뒤 공통 카탈로그를 생성합니다.
+고정 버전으로 설치하려면 첫 `up` 전에 `./stack build`를 명시적으로 실행합니다.
 카탈로그는 기동·업데이트 시 한 번 갱신합니다. 컨테이너의 초기 시도는 최대 3회 후 종료하며, 주기적인 갱신 작업은 없습니다.
-클라이언트의 기존 모델 인증을 전달하며, OpenCodex는 해당 요청의 로그인 계정을 메인 계정 후보로
-사용할 수 있습니다. 서버에 인증을 저장하고 계정별 갱신·사용량을 관리하려면 아래 관리 화면에서
-**풀 계정의 최초 로그인**을 완료하세요. 서버의 `native-main` 로그인을 만들거나 클라이언트의
-`auth.json`을 복사하는 절차는 아닙니다.
+기본 `CLIENT_AUTH_MODE=forward`는 클라이언트의 기존 모델 인증을 전달합니다.
+서버에 로그인한 메인 계정 또는 풀 계정을 사용하려면 `CLIENT_AUTH_MODE=server`로 설정할 수 있습니다.
+이 모드는 클라이언트 OpenAI 인증을 Caveman 앞에서 제거하며, 게이트웨이 키는 계속 필요합니다.
+메인 최초 로그인과 Windows에서 인증 전송을 끄는 방법은 [서버 계정 인증](docs/SERVER-ACCOUNT.md)을 참고하세요.
 
 기본 설정은 API `18787`, 관리 UI `20100`을 모든 IPv4 인터페이스에 공개합니다.
 `0.0.0.0`은 리스닝 주소이며 브라우저에서는 실제 서버 IP를 사용합니다.
@@ -110,7 +115,7 @@ ADMIN_PORT=20100
 
 | 용도 | 위 예시의 접속 주소 | 인증 |
 |---|---|---|
-| Codex 모델 연결 | `http://192.0.2.10:18787/v1` | 게이트웨이 키 + 모델 제공자 인증 |
+| Codex 모델 연결 | `http://192.0.2.10:18787/v1` | 게이트웨이 키 + 모델 제공자 인증 (`server`에서는 서버 인증 사용) |
 | 모델 카탈로그 | `http://192.0.2.10:18787/v1/catalog` | 동일한 게이트웨이 키 |
 | 원문 복구 MCP | `http://192.0.2.10:18787/mcp` | 동일한 게이트웨이 키 |
 | OpenCodex 관리 웹페이지 | `http://192.0.2.10:20100/` | `secrets/admin-key`의 관리자 토큰 |
@@ -174,6 +179,8 @@ OpenCodex 관리 웹페이지에서 본인의 계정을 추가 로그인하고 �
 이 로그인은 컨테이너의 `/state/codex/auth.json`에 **서버 메인 계정** 인증을 저장하며,
 호스트의 `data/state/codex`에 보존됩니다. 관리 화면의 **계정 풀 → 추가 → 기기 코드 로그인**으로
 등록한 풀 계정과는 별도입니다. 이미 정상인 풀 계정이 있다면 위 CLI 로그인을 다시 할 필요는 없습니다.
+OpenCodex 2.88.0 웹의 메인 계정 **디바이스 코드로 다시 로그인**은 기존 메인 인증의 재인증입니다.
+최초 로그인 파일이 없으면 `native_main_unavailable`이므로 위 CLI로 한 번 등록해야 합니다.
 
 `./stack codex`는 컨테이너에 설치된 CLI에 인자를 그대로 전달하며, 인자가 없으면 도움말을 표시합니다.
 로그인을 위해 모델 제공자·MCP·작업 폴더·샌드박스 설정을 추가하지 않습니다. Windows·WSL의 기존
@@ -348,8 +355,11 @@ Codex를 재시작해야 새 provider 설정이 적용됩니다.
 Windows는 `scripts/install-control-panel.ps1`, Linux/WSL은 `node scripts/install-control-panel-linux.mjs`로
 설치합니다. 기본 주소는 `http://127.0.0.1:18786/`이며 Linux 서버에는 GUI가 필요하지 않습니다.
 Windows에서는 바탕화면 `Caveman Control` 바로가기도 만듭니다. Pod 주소·키, 이 PC의 압축 ON/OFF,
-카탈로그 수동 동기화, SSH를 통한 서버 패키지 버전 확인·업데이트를 제공합니다.
+카탈로그 수동 동기화와 서버의 **Caveman CLI·OpenCodex·Codex CLI** 버전 확인·개별 업데이트를 제공합니다.
+Codex CLI는 Pod의 메인 계정 로그인용이며 Windows Codex 데스크톱 앱 업데이트와는 별개입니다.
 같은 Linux 저장소의 Podman은 설치 시 직접 관리 모드를 지정해 SSH 개인키 없이 관리할 수 있습니다.
+페이지가 보이는 동안 상태·경고를 평상시 10초, 작업 중 2.5초 간격으로 갱신하며, 연결 복구 시
+현재 장애 경고도 해제합니다. 인증 모드는 서버 설정에서 읽고, 편집 중인 입력과 작업 결과 알림은 보존합니다.
 서버와 로컬 브리지를 먼저 업데이트해야 하며, 자세한 설정과 복구 범위는
 [로컬 제어 페이지 운영 안내](docs/LOCAL-CONTROL.md)를 참고하세요.
 
@@ -380,6 +390,9 @@ OpenCodex에 외부 제공자를 추가할 때는 제공자의 URL·API 형식(�
 `20100` 관리 포트를 Codex 모델 연결 주소로 사용하면 Caveman을 우회합니다.
 
 ## 4. 업데이트·백업·복구
+
+관리 페이지에서는 `버전 확인` 후 세 구성 요소의 카드를 통해 각각 업데이트할 수 있습니다.
+선택하지 않은 구성 요소는 실행 중인 버전을 유지합니다. 세 가지를 함께 갱신하려면 다음 명령을 사용합니다.
 
 ```bash
 ./stack git-update             # Git fast-forward + 최신 안정 버전 조회 + 검증 후 배포

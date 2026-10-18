@@ -19,7 +19,8 @@ sudo update-ca-certificates
 
 ## 2. 이미지 build: npm과 Caveman binary
 
-`.env`의 proxy 값은 `stack build`가 Podman 환경으로 전달합니다.
+`.env`의 proxy 값은 최초 `stack up`의 최신 버전 조회, `stack update --latest`, `stack build`가
+Podman 환경으로 전달합니다. 버전 조회용 Node 컨테이너도 같은 회사 CA를 사용합니다.
 `certs/*.crt`, `certs/*.pem`을 모아 Podman build secret으로 npm/Node에 제공합니다.
 인증서나 proxy 비밀번호를 Containerfile의 `ARG`/`ENV`로 하드코딩하지 않습니다.
 
@@ -44,7 +45,8 @@ NO_PROXY=localhost,127.0.0.1,::1,.corp.example
 공개 루트 인증서를 대신 사용하므로 공개 HTTPS와 회사 CA로 서명된 HTTPS의 인증서 검증을 모두 유지합니다.
 들어오는 LAN HTTPS용 `certs/server.crt`는 이 신뢰 번들에서 제외합니다.
 Node/Bun용 `NODE_EXTRA_CA_CERTS`, 기타 TLS 클라이언트용 `SSL_CERT_FILE`, `CURL_CA_BUNDLE`,
-`REQUESTS_CA_BUNDLE`을 이 번들 경로로 런타임에 설정합니다. 회사 CA가 없으면 기존 신뢰 설정을 유지합니다.
+`REQUESTS_CA_BUNDLE`을 이 번들 경로로 런타임에 설정합니다. 회사 CA가 없고 시스템 CA 번들이
+정상이면 기존 신뢰 설정을 유지합니다. 시스템 번들이 없으면 회사 CA가 없어도 공개 루트 번들을 생성합니다.
 내부 Caveman→OpenCodex 경로가 회사 프록시로 나가지 않도록 루프백을 NO_PROXY에 항상 추가합니다.
 프록시 URL은 컨테이너 관리자에게 inspect로 보일 수 있으므로 rootless 사용자·호스트 접근 권한을 관리하세요.
 NTLM/Kerberos 등 특수 인증은 조직이 제공하는 로컬 proxy agent/인증 방식을 사용해야 하며 이 저장소가 구현하지 않습니다.

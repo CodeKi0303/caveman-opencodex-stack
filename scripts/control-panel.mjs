@@ -6,6 +6,7 @@ import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {runClient} from './client-lib.mjs';
 const directory=path.dirname(fileURLToPath(import.meta.url));
+const updateComponents=['caveman','opencodex','codex'];
 const read=file=>JSON.parse(fs.readFileSync(file,'utf8'));
 function atomic(file,value){const tmp=file+'.tmp-'+randomUUID();try{fs.writeFileSync(tmp,JSON.stringify(value,null,2)+'\n',{mode:0o600,flag:'wx'});fs.renameSync(tmp,file);}finally{if(fs.existsSync(tmp))fs.unlinkSync(tmp);}}
 function validUrl(value){const u=new URL(value);if(!['http:','https:'].includes(u.protocol)||u.username||u.password||u.search||u.hash||!['/v1','/v1/'].includes(u.pathname))throw Error('INVALID_URL');u.pathname='/v1';return u.href;}
@@ -22,9 +23,9 @@ export function validateManagement(value,{platform=process.platform}={}){
  if(!fs.statSync(value.keyFile).isFile())throw Error('SSH_KEY_UNREADABLE');
  return {host:value.host,keyFile:value.keyFile,repo:value.repo};
 }
-export function remoteCommand(settings,action,args={}, {platform=process.platform,spawnFn=spawn,timeoutMs=40*60*1000}={}){
- if(!['check','catalog','update'].includes(action)||!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).some(name=>action!=='update'||!['component','version'].includes(name)))throw Error('INVALID_SERVER_ACTION');
- if(action==='update'&&(!['caveman','opencodex'].includes(args.component)||!/^\d+\.\d+\.\d+$/.test(args.version??'')))throw Error('INVALID_VERSION');
+export function remoteCommand(settings,action,args={}, {platform=process.platform,spawnFn=spawn,timeoutMs=action==='status'?8000:40*60*1000}={}){
+ if(!['status','check','catalog','update'].includes(action)||!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).some(name=>action!=='update'||!['component','version'].includes(name)))throw Error('INVALID_SERVER_ACTION');
+ if(action==='update'&&(!updateComponents.includes(args.component)||!/^\d+\.\d+\.\d+$/.test(args.version??'')))throw Error('INVALID_VERSION');
  const m=validateManagement(settings.management,{platform});
  if(!m)throw Error('SSH_NOT_CONFIGURED');
  const local=m.mode==='local';
@@ -49,13 +50,30 @@ export function createControlPanel({configPath,fetchFn=fetch,client=runClient,re
  const key=c=>fs.readFileSync(c.keyFile,'utf8').trim();
  const safeSettings=c=>({upstreamUrl:c.upstreamUrl,compression:c.compression!==false,keyConfigured:fs.existsSync(c.keyFile),bridgeUrl:`http://127.0.0.1:${c.port}/v1`,management:c.management??null});
  const json=(res,status,value)=>res.writeHead(status,{'content-type':'application/json; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff'}).end(JSON.stringify(value));
- async function gateway(c,suffix){const r=await fetchFn(c.upstreamUrl+suffix,{headers:{'x-caveman-gateway-key':key(c)},redirect:'error',signal:AbortSignal.timeout(15000)});if(!r.ok)throw Error(r.status===401?'GATEWAY_KEY_REJECTED':'GATEWAY_UNAVAILABLE');return r.json();}
- async function status(){const c=settings();let bridge={ok:false},gatewayState={ok:false};
-  try{const r=await fetchFn(`http://127.0.0.1:${c.port}/healthz`,{signal:AbortSignal.timeout(2000)});const b=await r.json();bridge={ok:r.ok&&b.service==='caveman-native-bridge',compression:b.compression,hotReload:b.controlVersion===1};}catch{}
-  try{const info=await gateway(c,'/stack-info');gatewayState={ok:true,compressionSwitch:info.capabilities?.compressionSwitch===true};}catch{}
-  let catalog={count:0};try{const file=path.join(home,'opencodex-catalog.json'),data=read(file);catalog={count:data.models.length,modified:fs.statSync(file).mtime.toISOString()};}catch{}
-  return {ok:true,settings:safeSettings(c),bridge,gateway:gatewayState,catalog,job,busy};
+ async function gateway(c,suffix,timeoutMs=15000){const r=await fetchFn(c.upstreamUrl+suffix,{headers:{'x-caveman-gateway-key':key(c)},redirect:'error',signal:AbortSignal.timeout(timeoutMs)});if(!r.ok)throw Error(r.status===401?'GATEWAY_KEY_REJECTED':'GATEWAY_UNAVAILABLE');return r.json();}
+ let statusPending;
+ async function readStatus(){
+  const c=settings(),alerts=[];
+  let bridge={ok:false},gatewayState={ok:false},authentication={mode:'unknown',source:'unavailable'};
+  await Promise.all([
+   (async()=>{try{const r=await fetchFn(`http://127.0.0.1:${c.port}/healthz`,{signal:AbortSignal.timeout(2000)});const b=await r.json();bridge={ok:r.ok&&b.service==='caveman-native-bridge',compression:b.compression,hotReload:b.controlVersion===1};}catch{}})(),
+   (async()=>{try{const info=await gateway(c,'/stack-info',5000);gatewayState={ok:true,compressionSwitch:info.capabilities?.compressionSwitch===true};}catch(error){gatewayState.error=error.message==='GATEWAY_KEY_REJECTED'?'GATEWAY_KEY_REJECTED':'GATEWAY_UNAVAILABLE';}})(),
+   (async()=>{if(!c.management)return;try{
+    const result=await remote(c,'status',{});
+    if(result.ok===true&&result.authentication?.source==='server'&&['pool','direct'].includes(result.authentication.mode))authentication={mode:result.authentication.mode,source:'server'};
+   }catch{}})()
+  ]);
+  if(!bridge.ok)alerts.push({id:'bridge-unavailable',severity:'error',message:'로컬 브리지에 연결할 수 없습니다. 브리지 서비스 상태를 확인하세요.'});
+  else if(!bridge.hotReload)alerts.push({id:'bridge-upgrade',severity:'warning',message:'실시간 설정 반영을 지원하는 브리지로 업데이트하세요.'});
+  if(!gatewayState.ok)alerts.push({id:'gateway-unavailable',severity:'error',message:gatewayState.error==='GATEWAY_KEY_REJECTED'?'서버에서 게이트웨이 인증키를 거부했습니다. 연결 설정의 키를 확인하세요.':'Pod 게이트웨이에 연결할 수 없습니다. 서버 주소와 서비스 상태를 확인하세요.'});
+  else if(!gatewayState.compressionSwitch)alerts.push({id:'gateway-upgrade',severity:'warning',message:'이 서버는 클라이언트별 압축 선택을 지원하지 않습니다. 게이트웨이를 업데이트하세요.'});
+  if(bridge.ok&&typeof bridge.compression==='boolean'&&bridge.compression!==(c.compression!==false))alerts.push({id:'compression-mismatch',severity:'warning',message:'브리지의 압축 상태와 저장된 설정이 다릅니다. 다음 조회에서도 지속되면 브리지 서비스를 확인하세요.'});
+  if(c.management&&authentication.source==='unavailable')alerts.push({id:'authentication-unknown',severity:'warning',message:'서버의 계정 선택 모드를 확인하지 못했습니다. 관리 연결과 서버 설정을 확인하세요.'});
+  let catalog={count:0};try{const file=path.join(home,'opencodex-catalog.json'),data=read(file);if(!Array.isArray(data.models))throw Error();catalog={count:data.models.length,modified:fs.statSync(file).mtime.toISOString()};}catch{}
+  if(catalog.count===0)alerts.push({id:'catalog-empty',severity:'warning',message:'로컬 모델 목록이 비어 있습니다. 모델 목록 동기화를 실행하세요.'});
+  return {ok:true,checkedAt:new Date().toISOString(),settings:safeSettings(c),bridge,gateway:gatewayState,authentication,alerts,catalog,job,busy};
  }
+ function status(){return statusPending??=readStatus().finally(()=>{statusPending=undefined;});}
  async function save(body){
   const before=settings(),next={...before};
   next.upstreamUrl=validUrl(body.upstreamUrl);
@@ -121,7 +139,7 @@ export function createControlPanel({configPath,fetchFn=fetch,client=runClient,re
    if(!body||typeof body!=='object'||Array.isArray(body))throw Error('INVALID_INPUT');
    if(busy)return json(res,409,{error:'OPERATION_BUSY'});
    if(req.url==='/api/settings'){busy=true;try{return json(res,200,await save(body));}finally{busy=false;}}
-   if(req.url==='/api/update'&&(!['caveman','opencodex'].includes(body.component)||!/^\d+\.\d+\.\d+$/.test(body.version??'')))throw Error('INVALID_VERSION');
+   if(req.url==='/api/update'&&(!updateComponents.includes(body.component)||!/^\d+\.\d+\.\d+$/.test(body.version??'')))throw Error('INVALID_VERSION');
    if(req.url==='/api/update'&&body.confirm!==true)throw Error('UPDATE_CONFIRMATION_REQUIRED');
    return json(res,202,startJob(req.url.slice(5),body));
   }catch(error){const code=error.code??error.message;json(res,400,{ok:false,error:/^[A-Z_]+$/.test(code)?code:'OPERATION_FAILED'});}
