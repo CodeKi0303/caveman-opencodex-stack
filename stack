@@ -1,0 +1,370 @@
+#!/usr/bin/env python3
+"""Small Podman lifecycle CLI; no host npm, compose, or shell-sourced secrets."""
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+ROOT=Path(__file__).resolve().parent
+os.umask(0o077)
+
+def config():
+    env={}
+    p=ROOT/'.env'
+    if not p.exists():raise RuntimeError('Run ./stack init first')
+    for line in p.read_text().splitlines():
+        if not line.strip() or line.lstrip().startswith('#'):continue
+        k,sep,v=line.partition('=')
+        if not sep:raise RuntimeError('Expected KEY=VALUE in .env')
+        env[k.strip()]=v.strip()
+    return env
+
+def run(args,**kw):
+    return subprocess.run(args,check=kw.pop('check',True),**kw)
+
+def pod(*args,**kw):
+    # A detached container must outlive a short-lived systemd update worker.
+    # Move the launch into an independent scope so slirp4netns/rootlessport helpers
+    # cannot remain in the worker cgroup. Removing INVOCATION_ID alone only fixes
+    # conmon; the networking helpers would still die when the worker exits.
+    supplied_env=kw.pop('env',None)
+    env=dict(os.environ if supplied_env is None else supplied_env)
+    arguments=list(map(str,args))
+    scoped=bool(env.get('INVOCATION_ID')) and arguments and arguments[0]=='run' and any(
+        flag in arguments for flag in ('--detach','-d','--detach=true'))
+    for key in ('INVOCATION_ID','SYSTEMD_EXEC_PID','NOTIFY_SOCKET'):env.pop(key,None)
+    command=['podman',*arguments]
+    if scoped:
+        command=['systemd-run',*(['--user'] if os.geteuid()!=0 else []),'--scope','--quiet',
+            '--unit=caveman-podman-'+secrets.token_hex(12),
+            '--','/usr/bin/env','-u','INVOCATION_ID','-u','SYSTEMD_EXEC_PID','-u','NOTIFY_SOCKET',*command]
+    return run(command,env=env,**kw)
+
+def name(c):return c['STACK_NAME']
+
+def image_id(c):
+    p=ROOT/'data/active-image'
+    return p.read_text().strip() if p.exists() else c['IMAGE']
+
+def runtime_env(c):
+    allowed={'HTTP_PROXY','HTTPS_PROXY','NO_PROXY','ALLOWED_CIDRS','MAX_REQUEST_BYTES','CAVEMAN_MODE','GATEWAY_TLS_CERT','GATEWAY_TLS_KEY'}
+    return [a for k,v in c.items() if k in allowed and v for a in ['--env',k+'='+v]]
+
+def build_env(c):
+    e=os.environ.copy()
+    for k in ('HTTP_PROXY','HTTPS_PROXY','NO_PROXY'):
+        if c.get(k):e[k]=c[k]
+    return e
+
+def bundle_ca():
+    files=[p for p in (ROOT/'certs').glob('*') if p.suffix in ('.crt','.pem') and p.name!='server.crt']
+    if not files:return None
+    p=ROOT/'secrets/build-ca.pem';p.write_bytes(b'\n'.join(f.read_bytes() for f in files));return p
+
+def build(c,tag=None,context=None):
+    context=Path(context) if context is not None else ROOT
+    args=['build','--format','docker','--network',c.get('BUILD_NETWORK','slirp4netns'),'--tag',tag or c['IMAGE'],'--file',context/'Containerfile']
+    ca=bundle_ca()
+    if ca:args+=['--secret','id=corp_ca,src='+str(ca)]
+    pod(*args,context,env=build_env(c))
+
+def exists(n):return subprocess.run(['podman','container','exists',n],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
+
+def down(c):
+    if exists(name(c)):
+        owner=pod('inspect',name(c),'--format','{{index .Config.Labels "io.caveman-stack.managed"}}',capture_output=True,text=True).stdout.strip()
+        if owner!='true':raise RuntimeError('Refusing to stop a container not owned by this stack')
+        pod('stop','--time','30',name(c),stdout=subprocess.DEVNULL)
+        pod('rm',name(c),stdout=subprocess.DEVNULL)
+
+def launch(c,image=None,container=None,state=None,publish=True):
+    n=container or name(c);state=state or ROOT/'data/state';state.mkdir(parents=True,exist_ok=True,mode=0o700)
+    if exists(n):raise RuntimeError('Container already exists; use status or down first')
+    args=['run','--detach','--name',n,'--network',c.get('NETWORK','slirp4netns'),'--label','io.caveman-stack.managed=true',
+          '--security-opt','no-new-privileges','--cap-drop','all',
+          '--volume',str(state)+':/state:Z',
+          '--volume',str(ROOT/'secrets')+':/run/secrets:ro,z',
+          '--volume',str(ROOT/'certs')+':/certs:ro,z',*runtime_env(c)]
+    if publish:args+=['--publish',f"{c['BIND_ADDRESS']}:{c['PORT']}:8080"]
+    if publish and c.get('ADMIN_PORT'):
+        admin_address=c.get('ADMIN_BIND_ADDRESS') or c['BIND_ADDRESS']
+        args+=['--publish',f"{admin_address}:{c['ADMIN_PORT']}:10100"]
+    pod(*args,image or image_id(c),stdout=subprocess.DEVNULL)
+    try:
+        for _ in range(45):
+            p=subprocess.run(['podman','exec',n,'node','/app/scripts/health.mjs'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            if p.returncode==0:return
+            time.sleep(1)
+        raise RuntimeError('Stack readiness failed; inspect podman logs locally')
+    except BaseException:
+        subprocess.run(['podman','rm','--force',n],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        raise
+
+def catalog(c,container=None):
+    # HTTP uses the shared loopback namespace, even with external HTTPS enabled.
+    # Export from OpenCodex directly: the command runs inside this private container.
+    pod('exec','--env','NO_PROXY=localhost,127.0.0.1,::1','--env','no_proxy=localhost,127.0.0.1,::1',
+        container or name(c),'node','/app/src/catalog-refresh.mjs','--once')
+
+def account_mode(c,mode=None):
+    if mode not in (None,'pool','direct'):raise RuntimeError('Usage: ./stack account-mode [pool|direct]')
+    # Send the checked-out helper over stdin so existing images can switch modes
+    # without a rebuild/restart. Credentials are read inside the container only.
+    script=(ROOT/'scripts/account-mode.mjs').read_text()
+    pod('exec','-i','--env','NO_PROXY=localhost,127.0.0.1,::1',
+        '--env','no_proxy=localhost,127.0.0.1,::1',name(c),
+        'node','--input-type=module','-',*([mode] if mode else []),input=script,text=True)
+
+def container_codex(c,args):
+    # Login helper: preserve the native Codex configuration/auth location. Do
+    # not inject model routing, credentials, workspaces, or sandbox overrides.
+    # Reuse the CA bundle prepared by the running supervisor for corporate TLS.
+    entry='''if [ -s /state/company-ca-bundle.pem ]; then
+export NODE_EXTRA_CA_CERTS=/state/company-ca-bundle.pem
+export SSL_CERT_FILE=/state/company-ca-bundle.pem
+export CURL_CA_BUNDLE=/state/company-ca-bundle.pem
+fi
+exec /app/node_modules/.bin/codex "$@"
+'''
+    flags=['-i',*(['-t'] if sys.stdin.isatty() and sys.stdout.isatty() else [])]
+    result=pod('exec',*flags,name(c),'/bin/sh','-c',entry,'stack-codex',*(args or ['--help']),check=False)
+    return result.returncode
+
+def copy_state(source,target):
+    # Unix sockets/FIFOs are transient IPC, not persistent backup data.
+    def transient(directory,names):
+        return [n for n in names if stat.S_ISSOCK((Path(directory)/n).lstat().st_mode)
+                or stat.S_ISFIFO((Path(directory)/n).lstat().st_mode)]
+    shutil.copytree(source,target,symlinks=True,ignore=transient)
+
+def snapshot(c,restart=True):
+    current=image_id(c);down(c)
+    target=ROOT/'backups'/time.strftime('%Y%m%d-%H%M%S');target.mkdir(parents=True,mode=0o700)
+    try:
+        copy_state(ROOT/'data/state',target/'state')
+        (target/'image').write_text(current+'\n')
+        shutil.copy2(ROOT/'.env',target/'stack.env')
+    finally:
+        if restart:launch(c,current)
+    return target
+
+def update(c,context=None):
+    tag=c['IMAGE'].rsplit(':',1)[0]+':candidate-'+str(int(time.time()))
+    if context is None:build(c,tag)
+    else:build(c,tag,context=context)
+    # Resolve immutable local image IDs, so later tag changes do not break rollback.
+    old=pod('image','inspect',image_id(c),'--format','{{.Id}}',capture_output=True,text=True).stdout.strip()
+    candidate=pod('image','inspect',tag,'--format','{{.Id}}',capture_output=True,text=True).stdout.strip()
+    (ROOT/'data/active-image').write_text(old+'\n')
+    backup=snapshot(c)
+    trial=ROOT/'data'/('trial-'+str(int(time.time())))
+    copy_state(backup/'state',trial)
+    n=name(c)+'-candidate'
+    try:
+        launch(c,candidate,n,trial,False);catalog(c,n)
+    finally:
+        subprocess.run(['podman','rm','--force',n],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        shutil.rmtree(trial)
+    down(c)
+    try:
+        launch(c,candidate);catalog(c)
+        (ROOT/'data/active-image').write_text(candidate+'\n')
+        print('Updated. Rollback snapshot:',backup)
+    except BaseException:
+        down(c)
+        failed=ROOT/'data'/('failed-'+str(int(time.time())))
+        (ROOT/'data/state').rename(failed)
+        copy_state(backup/'state',ROOT/'data/state')
+        launch(c,old)
+        raise RuntimeError('Update failed; previous image and state restored')
+
+
+LATEST_PACKAGES=('@caveman-ai/cli','@bitkyc08/opencodex','@openai/codex')
+
+def stage_source(target):
+    # A separate build context keeps repeat Git updates clean and never copies private state.
+    excluded={'.git','node_modules','data','backups','secrets','certs','exports','__pycache__'}
+    def ignore(directory,names):
+        return [n for n in names if n in excluded or n.startswith('.env') or n=='auth.json'
+                or n.endswith(('.log','.db','.sqlite','.sqlite3'))]
+    shutil.copytree(ROOT,target,symlinks=True,ignore=ignore)
+
+def cleanup_resolver(container,owner):
+    if not exists(container):return
+    try:
+        actual=pod('inspect',container,'--format','{{index .Config.Labels "io.caveman-stack.resolver"}}',
+            capture_output=True,text=True,timeout=15).stdout.strip()
+        if actual!=owner:raise RuntimeError('Refusing to remove a resolver container with a different owner')
+        pod('rm','--force',container,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=30)
+    except (subprocess.CalledProcessError,subprocess.TimeoutExpired):
+        # --rm may finish between exists/inspect/remove; an absent container needs no cleanup.
+        if exists(container):raise RuntimeError('Resolver cleanup failed; inspect the named caveman-latest-resolver container locally')
+
+def resolve_latest(c,stage):
+    # npm itself resolves the registry and package metadata, honoring proxy and CA settings.
+    # Only runtime products follow latest. SDK/parser library versions remain pinned.
+    script=r'''
+const fs=require('node:fs');const {execFileSync}=require('node:child_process');
+const names=JSON.parse(process.argv[1]);const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));
+const npm=(args)=>execFileSync('npm',[...args,'--fetch-retries=1','--fetch-timeout=15000'],{encoding:'utf8',stdio:['ignore','pipe','pipe'],timeout:180000});
+const versions={};
+for(const name of names){
+  if(!Object.hasOwn(pkg.dependencies,name))throw new Error('Missing runtime dependency');
+  const version=JSON.parse(npm(['view',name,'dist-tags.latest','--json','--prefer-online']));
+  if(typeof version!=='string'||!/^\d+\.\d+\.\d+$/.test(version))throw new Error('Latest tag is not a stable exact version');
+  versions[name]=version;
+}
+for(const [name,version] of Object.entries(versions))pkg.dependencies[name]=version;
+fs.writeFileSync('package.json',JSON.stringify(pkg,null,2)+'\n');
+npm(['install','--package-lock-only','--ignore-scripts','--no-audit','--no-fund']);
+const lock=JSON.parse(fs.readFileSync('package-lock.json','utf8'));
+for(const [name,version] of Object.entries(versions)){
+  if(lock.packages?.['node_modules/'+name]?.version!==version||lock.packages?.['']?.dependencies?.[name]!==version)throw new Error('Lock version mismatch');
+}
+console.log(JSON.stringify(versions));
+'''
+    extra=[];ca=bundle_ca()
+    if ca:extra=['--volume',str(ca)+':/tmp/company-ca.pem:ro,z','--env','NODE_EXTRA_CA_CERTS=/tmp/company-ca.pem']
+    proxy=[a for key in ('HTTP_PROXY','HTTPS_PROXY','NO_PROXY') if build_env(c).get(key) for a in ('--env',key)]
+    owner=secrets.token_hex(12);container='caveman-latest-resolver-'+owner
+    try:
+        result=pod('run','--rm','--name',container,'--label','io.caveman-stack.resolver='+owner,
+            '--network',c.get('BUILD_NETWORK','slirp4netns'),
+            '--volume',str(stage)+':/work:Z','--workdir','/work',*proxy,*extra,
+            '--entrypoint','node',image_id(c),'-e',script,json.dumps(LATEST_PACKAGES),
+            env=build_env(c),capture_output=True,text=True,timeout=300)
+    finally:
+        # Killing a timed-out Podman client does not stop its container. Remove our owned
+        # resolver before the caller deletes its writable temporary build directory.
+        cleanup_resolver(container,owner)
+    try:versions=json.loads(result.stdout)
+    except json.JSONDecodeError:raise RuntimeError('Latest dependency resolution returned an invalid result')
+    if not isinstance(versions,dict) or set(versions)!=set(LATEST_PACKAGES) or any(
+            not isinstance(value,str) or not re.fullmatch(r'\d+\.\d+\.\d+',value) for value in versions.values()):
+        raise RuntimeError('Latest dependency resolution returned an invalid result')
+    return versions
+
+def update_latest(c):
+    if shutil.disk_usage(ROOT).free<4*1024**3:raise RuntimeError('At least 4 GiB free disk space is required for an update')
+    release=ROOT/'data/releases'/(time.strftime('%Y%m%d-%H%M%S')+'-'+secrets.token_hex(4))
+    release.mkdir(parents=True,mode=0o700)
+    metadata={'status':'resolving','packages':list(LATEST_PACKAGES)}
+    try:
+        metadata['sourceCommit']=run(['git','-C',str(ROOT),'rev-parse','HEAD'],capture_output=True,text=True).stdout.strip()
+        metadata['sourceModified']=bool(run(['git','-C',str(ROOT),'status','--porcelain','--untracked-files=normal'],capture_output=True,text=True).stdout.strip())
+    except (OSError,subprocess.CalledProcessError):pass
+    def record(): (release/'release.json').write_text(json.dumps(metadata,indent=2)+'\n')
+    record()
+    applied=False
+    try:
+        with tempfile.TemporaryDirectory(prefix='update-build-',dir=ROOT/'data') as temporary:
+            stage=Path(temporary)/'source';stage_source(stage)
+            versions=resolve_latest(c,stage)
+            for filename in ('package.json','package-lock.json'):shutil.copy2(stage/filename,release/filename)
+            metadata.update(status='validating',versions=versions);record()
+            print('Resolved latest stable runtime versions:',json.dumps(versions,sort_keys=True),flush=True)
+            update(c,context=stage)
+            applied=True
+        metadata.update(status='applied',image=image_id(c));record()
+        print('Exact release manifests:',release)
+        return release
+    except BaseException:
+        metadata['status']='applied-record-error' if applied else 'failed'
+        try:record()
+        except OSError:pass
+        if applied:raise RuntimeError('Update was applied, but release bookkeeping failed. Check the running image before retrying.')
+        raise
+
+def git_update(lock):
+    # Reject local changes before fetching. Never stash, reset, switch branches, or force push.
+    git=lambda *args:run(['git','-C',str(ROOT),*args],capture_output=True,text=True)
+    git('symbolic-ref','--quiet','HEAD')
+    git('rev-parse','--abbrev-ref','--symbolic-full-name','@{upstream}')
+    if git('status','--porcelain','--untracked-files=normal').stdout.strip():
+        raise RuntimeError('Git checkout has local changes; commit or reconcile them before ./stack git-update')
+    git('pull','--ff-only')
+    print('Git source updated. Resolving latest stable runtime versions with the updated CLI.',flush=True)
+    # Transfer the same flock into the replacement process; no unlock/relock window.
+    os.set_inheritable(lock.fileno(),True)
+    os.execv(sys.executable,[sys.executable,str(ROOT/'stack'),'update','--latest','--operation-lock-fd',str(lock.fileno())])
+
+def operation_lock(inherited=None):
+    path=ROOT/'data/operation.lock'
+    if inherited is None:return path.open('a')
+    try:
+        actual=os.fstat(inherited);expected=path.stat()
+        if not stat.S_ISREG(actual.st_mode) or (actual.st_dev,actual.st_ino)!=(expected.st_dev,expected.st_ino):
+            raise RuntimeError('Invalid inherited operation lock')
+        os.set_inheritable(inherited,False)
+        return os.fdopen(inherited,'a')
+    except (OSError,ValueError):raise RuntimeError('Invalid inherited operation lock')
+
+def main():
+    if len(sys.argv)>1 and sys.argv[1]=='codex':
+        sys.exit(container_codex(config(),sys.argv[2:]))
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command',choices=['init','build','up','down','status','logs','catalog','account-mode','codex','backup','update','git-update','rollback','mcp','lock'])
+    parser.add_argument('path',nargs='?')
+    parser.add_argument('--latest',action='store_true',help='update: resolve latest stable Caveman, OpenCodex, and Codex in a separate build context')
+    parser.add_argument('--operation-lock-fd',type=int,help=argparse.SUPPRESS)
+    args=parser.parse_args()
+    if args.latest and args.command!='update':parser.error('--latest is only supported with update')
+    if args.operation_lock_fd is not None and not (args.command=='update' and args.latest):parser.error('Invalid inherited operation')
+    if args.command=='init':
+        for d in ['data','secrets','certs','backups']:(ROOT/d).mkdir(exist_ok=True,mode=0o700)
+        if not (ROOT/'.env').exists():shutil.copy2(ROOT/'.env.example',ROOT/'.env')
+        (ROOT/'.env').chmod(0o600)
+        for k in ['gateway-key','admin-key']:
+            p=ROOT/'secrets'/k
+            if not p.exists():p.write_text(secrets.token_hex(32)+'\n');p.chmod(0o600)
+        print('Initialized .env and private keys. Edit .env, then ./stack build && ./stack up');return
+    c=config()
+    if args.command=='mcp':
+        os.execvp('podman',['podman','exec','-i',name(c),'/opt/caveman/bin/caveman-mcp'])
+    if args.command=='logs':pod('logs','--tail','100',name(c));return
+    if args.command=='status':pod('ps','-a','--filter','name=^'+name(c)+'$');return
+    with operation_lock(args.operation_lock_fd) as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        if args.command=='build':build(c)
+        elif args.command=='up':
+            launch(c);catalog(c)
+            ident=pod('image','inspect',image_id(c),'--format','{{.Id}}',capture_output=True,text=True).stdout.strip()
+            (ROOT/'data/active-image').write_text(ident+'\n');print('Stack ready')
+        elif args.command=='down':down(c)
+        elif args.command=='catalog':catalog(c)
+        elif args.command=='account-mode':account_mode(c,args.path)
+        elif args.command=='backup':print(snapshot(c))
+        elif args.command=='update':
+            if args.latest:update_latest(c)
+            else:update(c)
+        elif args.command=='git-update':git_update(lock)
+        elif args.command=='rollback':
+            if not args.path:raise RuntimeError('Usage: ./stack rollback backups/TIMESTAMP')
+            b=Path(args.path).resolve()
+            if not (b/'state').is_dir() or not (b/'image').is_file():raise RuntimeError('Invalid backup')
+            old=(b/'image').read_text().strip();pod('image','exists',old)
+            down(c)
+            (ROOT/'data/state').rename(ROOT/'data'/('before-rollback-'+str(int(time.time()))))
+            copy_state(b/'state',ROOT/'data/state');launch(c,old)
+            (ROOT/'data/active-image').write_text(old+'\n');print('Restored',b)
+        elif args.command=='lock':
+            ca=bundle_ca();extra=[]
+            if ca:extra=['--volume',str(ca)+':/tmp/company-ca.pem:ro,z','--env','NODE_EXTRA_CA_CERTS=/tmp/company-ca.pem']
+            pod('run','--rm','--network',c.get('BUILD_NETWORK','slirp4netns'),'--volume',str(ROOT)+':/work:Z','--workdir','/work',*runtime_env(c),*extra,
+                'docker.io/library/node:24.21.0-bookworm-slim','npm','install','--package-lock-only','--ignore-scripts','--no-audit','--no-fund')
+
+if __name__=='__main__':
+    try:main()
+    except (RuntimeError,subprocess.CalledProcessError,subprocess.TimeoutExpired,BlockingIOError) as e:
+        # Avoid echoing command argv: environment flags can contain proxy passwords.
+        print(str(e) if isinstance(e,RuntimeError) else 'Operation failed; another operation may be active. Check local Podman status.',file=sys.stderr)
+        sys.exit(1)
