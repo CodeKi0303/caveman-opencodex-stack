@@ -51,7 +51,10 @@ function renderStatus(s,requestedRevision){
  $('bridge-status').textContent=s.bridge.ok?'● 정상 연결':'○ 연결 확인 필요';
  $('gateway-status').textContent=s.gateway.ok?'● 인증 확인됨':'○ 연결 또는 버전 확인';
  $('authentication-status').textContent=s.authentication?.mode==='pool'?'서버 계정 풀':s.authentication?.mode==='direct'?'요청별 계정 선택 (direct)':'서버 설정 확인 필요';
- $('catalog-status').textContent=s.catalog.count+'개 모델';$('model-count').textContent=s.catalog.count;
+ $('catalog-status').textContent='선택 가능 '+s.catalog.count+'개';$('model-count').textContent=s.catalog.count;
+ const catalogDetails=Number.isInteger(s.catalog.totalCount)&&Number.isInteger(s.catalog.hiddenCount);
+ $('catalog-summary').hidden=!catalogDetails;
+ $('catalog-summary').textContent=catalogDetails?'전체 '+s.catalog.totalCount+'개 · 숨김 '+s.catalog.hiddenCount+'개':'';
  $('catalog-date').textContent='마지막 로컬 변경 '+(s.catalog.modified?new Date(s.catalog.modified).toLocaleString('ko-KR'):'—');
  renderHealth(s.alerts??[...(!s.bridge.ok?[{severity:'warning',message:'로컬 브리지 연결을 확인해 주세요.'}]:[]),...(!s.gateway.ok?[{severity:'error',message:'서버 연결 또는 인증 상태를 확인해 주세요.'}]:[])]);
  localManagement=s.settings.management?.mode==='local'?{mode:'local',repo:s.settings.management.repo}:null;

@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {createHash, randomUUID} from 'node:crypto';
 import {parseConfig, patchConfig, effectiveConfig, ConfigError, REMOVE, at} from './client-config.mjs';
+import {summarizeCatalog} from './catalog-summary.mjs';
 
 export class ClientError extends Error {
   constructor(code,message) {super(message);this.code=code;}
@@ -220,10 +221,10 @@ async function inspectBridge(url,base,fetchFn) {
     if(!endpointEquals(health.upstream,base))return {ok:false,url,error:'BRIDGE_UPSTREAM_MISMATCH'};
     const catalog=await fetchFn(url+'/catalog',{headers:{},redirect:'error',signal:AbortSignal.timeout(15000)});
     if(!catalog.ok)return {ok:false,url,upstreamMatches:true,error:'BRIDGE_CATALOG_HTTP_'+catalog.status};
-    let models;
-    try {models=validateCatalog(await catalog.json()).models.length;}
+    let summary;
+    try {summary=summarizeCatalog(validateCatalog(await catalog.json()));}
     catch {return {ok:false,url,upstreamMatches:true,error:'BRIDGE_CATALOG_INVALID'};}
-    return {ok:true,url,upstreamMatches:true,catalogAvailable:true,models};
+    return {ok:true,url,upstreamMatches:true,catalogAvailable:true,models:summary.count,totalModels:summary.totalCount,hiddenModels:summary.hiddenCount};
   } catch {return {ok:false,url,error:'BRIDGE_UNREACHABLE'};}
 }
 
@@ -285,7 +286,7 @@ async function execute(argv,fetchFn) {
   if(opts['auth-file']) {auth=jsonRead(opts['auth-file']);if(!auth)fail('AUTH_FILE_INVALID','The supplied auth file is unreadable or invalid.');}
   if(command==='doctor') {
     let remote;
-    try {const result=await catalogRequest(base,key,undefined,local,metadata,fetchFn,false);remote={ok:true,models:result.catalog.models.length,notModified:result.notModified};}
+    try {const result=await catalogRequest(base,key,undefined,local,metadata,fetchFn,false),summary=summarizeCatalog(result.catalog);remote={ok:true,models:summary.count,totalModels:summary.totalCount,hiddenModels:summary.hiddenCount,notModified:result.notModified};}
     catch(error){remote={ok:false,error:error instanceof ClientError?error.code:'CATALOG_UNAVAILABLE'};}
     const mcp=await inspectMcp(mcpUrl(base),key,fetchFn),authState={...authMetadata(opts['auth-file']||path.join(home,'auth.json')),
       required:report.provider==='openai'||report.clientAuthMode!=='server'};

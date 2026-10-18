@@ -70,6 +70,21 @@ test('failed polling retries, labels stale data and clears recovered health aler
  f.state.failure=false;await f.tick();assert.equal(f.element('health-alerts').hidden,true);assert.equal(f.element('notice-text').textContent,notice);assert.equal(f.element('notice').hidden,false);assert(!f.element('status-updated').textContent.includes('실패'));
  await f.element('dismiss-notice').dispatch('click');await f.tick();assert.equal(f.element('notice').hidden,true,'dismissed terminal job must not announce again on every poll');
 });
+test('model counts show selectable and hidden totals, refresh visibility-only changes and support legacy status',async()=>{
+ const f=await fixture();assert.equal(f.element('catalog-summary').hidden,true);assert.equal(f.element('model-count').textContent,9);
+ f.state.status.catalog={count:3,totalCount:9,hiddenCount:6,modified:'2026-10-18T01:00:00.000Z'};
+ await f.tick();assert.equal(f.element('model-count').textContent,3);assert.equal(f.element('catalog-status').textContent,'선택 가능 3개');
+ assert.equal(f.element('catalog-summary').hidden,false);assert.equal(f.element('catalog-summary').textContent,'전체 9개 · 숨김 6개');
+ f.state.status.catalog.count=2;f.state.status.catalog.hiddenCount=7;
+ await f.tick();assert.equal(f.element('model-count').textContent,2);assert.equal(f.element('catalog-summary').textContent,'전체 9개 · 숨김 7개');
+ f.state.status.catalog.count=0;f.state.status.catalog.hiddenCount=9;
+ f.state.status.alerts=[{id:'catalog-no-selectable',severity:'warning',message:'선택 가능한 로컬 모델이 없습니다.'}];
+ await f.tick();assert.equal(f.element('model-count').textContent,0);assert.equal(f.element('catalog-summary').textContent,'전체 9개 · 숨김 9개');
+ assert.equal(f.element('health-alerts').hidden,false);assert.match(f.element('health-alert-text').textContent,/선택 가능한/);
+ f.state.status.catalog={count:9};f.state.status.alerts=[];await f.tick();
+ assert.equal(f.element('catalog-summary').hidden,true);assert.equal(f.element('catalog-summary').textContent,'');
+ assert(f.calls.every(call=>call.url==='/api/status'&&call.method==='GET'),'refreshing counts must not synchronize or modify settings');
+});
 
 test('initial connectivity failure recovers, while a restarted control process asks for browser reload',async()=>{
  const f=await fixture({initialFailure:true});assert.match(f.element('status-updated').textContent,/아직 상태/);assert.equal(f.timers.size,1);

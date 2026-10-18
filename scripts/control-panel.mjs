@@ -5,6 +5,7 @@ import {randomBytes,randomUUID} from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {runClient} from './client-lib.mjs';
+import {summarizeCatalog} from './catalog-summary.mjs';
 const directory=path.dirname(fileURLToPath(import.meta.url));
 const updateComponents=['caveman','opencodex','codex'];
 const read=file=>JSON.parse(fs.readFileSync(file,'utf8'));
@@ -69,8 +70,9 @@ export function createControlPanel({configPath,fetchFn=fetch,client=runClient,re
   else if(!gatewayState.compressionSwitch)alerts.push({id:'gateway-upgrade',severity:'warning',message:'이 서버는 클라이언트별 압축 선택을 지원하지 않습니다. 게이트웨이를 업데이트하세요.'});
   if(bridge.ok&&typeof bridge.compression==='boolean'&&bridge.compression!==(c.compression!==false))alerts.push({id:'compression-mismatch',severity:'warning',message:'브리지의 압축 상태와 저장된 설정이 다릅니다. 다음 조회에서도 지속되면 브리지 서비스를 확인하세요.'});
   if(c.management&&authentication.source==='unavailable')alerts.push({id:'authentication-unknown',severity:'warning',message:'서버의 계정 선택 모드를 확인하지 못했습니다. 관리 연결과 서버 설정을 확인하세요.'});
-  let catalog={count:0};try{const file=path.join(home,'opencodex-catalog.json'),data=read(file);if(!Array.isArray(data.models))throw Error();catalog={count:data.models.length,modified:fs.statSync(file).mtime.toISOString()};}catch{}
-  if(catalog.count===0)alerts.push({id:'catalog-empty',severity:'warning',message:'로컬 모델 목록이 비어 있습니다. 모델 목록 동기화를 실행하세요.'});
+  let catalog={count:0,totalCount:0,hiddenCount:0};try{const file=path.join(home,'opencodex-catalog.json'),data=read(file);if(!Array.isArray(data.models))throw Error();catalog={...summarizeCatalog(data),modified:fs.statSync(file).mtime.toISOString()};}catch{}
+  if(catalog.totalCount===0)alerts.push({id:'catalog-empty',severity:'warning',message:'로컬 모델 목록이 비어 있습니다. 모델 목록 동기화를 실행하세요.'});
+  else if(catalog.count===0)alerts.push({id:'catalog-no-selectable',severity:'warning',message:'선택 가능한 로컬 모델이 없습니다. OpenCodex에서 사용할 모델을 선택한 뒤 모델 목록을 동기화하세요.'});
   return {ok:true,checkedAt:new Date().toISOString(),settings:safeSettings(c),bridge,gateway:gatewayState,authentication,alerts,catalog,job,busy};
  }
  function status(){return statusPending??=readStatus().finally(()=>{statusPending=undefined;});}

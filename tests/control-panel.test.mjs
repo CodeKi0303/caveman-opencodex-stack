@@ -57,6 +57,34 @@ test('unmanaged clients do not guess an authentication mode or launch a server a
  const f=await fixture(t),status=await f.call('status').then(r=>r.json());
  assert.deepEqual(status.authentication,{mode:'unknown',source:'unavailable'});assert.deepEqual(f.calls,[]);
 });
+test('catalog status counts selectable models and refreshes visibility changes without altering catalog metadata',async t=>{
+ const f=await fixture(t),file=path.join(f.home,'opencodex-catalog.json');
+ const models=Array.from({length:9},(_,i)=>({slug:'model-'+i,visibility:i<3?'list':'hide',metadata:{fixture:i}}));
+ models[8]={slug:'auto-review',visibility:'hide',supported_in_api:false,metadata:{purpose:'internal-review'}};
+ const write=()=>{const text=JSON.stringify({models,metadata:{source:'fixture'}});fs.writeFileSync(file,text);return text;};
+ let before=write(),modified=fs.statSync(file).mtime.toISOString();
+ let status=await f.call('status').then(r=>r.json());
+ assert.deepEqual(status.catalog,{count:3,totalCount:9,hiddenCount:6,modified});assert.deepEqual(status.alerts,[]);
+ assert.equal(fs.readFileSync(file,'utf8'),before);assert.equal(fs.statSync(file).mtime.toISOString(),modified);
+ models[2].visibility='hide';before=write();modified=fs.statSync(file).mtime.toISOString();
+ status=await f.call('status').then(r=>r.json());
+ assert.deepEqual(status.catalog,{count:2,totalCount:9,hiddenCount:7,modified});
+ assert.equal(fs.readFileSync(file,'utf8'),before);assert.deepEqual(f.calls,[]);
+ assert.deepEqual(JSON.parse(fs.readFileSync(file)).models.at(-1),models[8]);
+});
+test('catalog alerts distinguish missing rows from a catalog with every model hidden, and legacy rows remain visible',async t=>{
+ const f=await fixture(t),file=path.join(f.home,'opencodex-catalog.json');
+ fs.writeFileSync(file,JSON.stringify({models:[{slug:'hidden-model',visibility:'hide'}]}));
+ let status=await f.call('status').then(r=>r.json());
+ assert.equal(status.catalog.count,0);assert.equal(status.catalog.totalCount,1);assert.equal(status.catalog.hiddenCount,1);
+ assert.deepEqual(status.alerts.map(a=>a.id),['catalog-no-selectable']);assert.match(status.alerts[0].message,/선택/);
+ fs.writeFileSync(file,JSON.stringify({models:[{slug:'legacy-model'}]}));
+ status=await f.call('status').then(r=>r.json());
+ assert.equal(status.catalog.count,1);assert.equal(status.catalog.totalCount,1);assert.equal(status.catalog.hiddenCount,0);assert.deepEqual(status.alerts,[]);
+ fs.writeFileSync(file,JSON.stringify({models:[]}));status=await f.call('status').then(r=>r.json());
+ assert.equal(status.catalog.count,0);assert.equal(status.catalog.totalCount,0);assert.equal(status.catalog.hiddenCount,0);
+ assert.deepEqual(status.alerts.map(a=>a.id),['catalog-empty']);assert.deepEqual(f.calls,[]);
+});
 test('concurrent status requests share one in-flight read without retaining stale results',async t=>{
  const f=await fixture(t,{management:{mode:'local',repo},platform:'linux'});
  let finish;f.state.statusWait=new Promise(resolve=>{finish=resolve;});

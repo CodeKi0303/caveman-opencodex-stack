@@ -39,6 +39,16 @@ function fixture(t,config='') {
   return {home,state,run,configValue,snapshot};
 }
 
+test('diagnostics count visible models while sync preserves hidden catalog metadata',async t=>{
+  const f=fixture(t);
+  f.state.catalog={models:Array.from({length:9},(_,i)=>({slug:'fixture-'+i,display_name:'Fixture '+i,visibility:i<3?'list':'hide',supported_in_api:true}))};
+  await f.run('configure');
+  const before=f.snapshot(),result=await f.run('doctor');
+  assert.equal(result.catalog.models,3);assert.equal(result.catalog.totalModels,9);assert.equal(result.catalog.hiddenModels,6);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.home,'opencodex-catalog.json'),'utf8')),f.state.catalog);
+  assert.deepEqual(f.snapshot(),before);
+});
+
 test('configure installs one provider and HTTP recovery MCP, disables request compression',async t=>{
   const f=fixture(t,'# retain this comment\n[features]\nexample = true\n');
   const result=await f.run('configure'),config=f.configValue();

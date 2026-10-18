@@ -20,13 +20,22 @@ function fixture(t,{existing=false,...injections}={}) {
     fetchFn:async(url,opts)=>{
       if(state.reject)return new Response('',{status:401});
       if(url.endsWith('/healthz'))return Response.json({service:'caveman-native-bridge',controlVersion:1,upstreamUrl:'http://old.test:18787/v1'});
-      if(url.endsWith('/catalog'))return Response.json({models:[{slug:'test',display_name:'Test',visibility:'list'}]});
+      if(url.endsWith('/catalog'))return Response.json(state.catalog??{models:[{slug:'test',display_name:'Test',visibility:'list'}]});
       if(url.endsWith('/stack-info')){assert.equal(opts.headers['x-caveman-gateway-key'],state.key??key);return Response.json({capabilities:{compressionSwitch:true}});}
       return new Response('<meta name="control-token">');
     },client:async args=>{calls.push({client:args});if(state.failClient)throw Error('secret-client-error');return {ok:true,warnings:[],catalogChanged:false};},...injections});
   t.after(()=>fs.rmSync(repo,{recursive:true,force:true}));
   return {repo,home,dir,key,keyFile,configPath,authFile,original,calls,state,manager};
 }
+
+test('manager status counts selectable models without removing hidden metadata',async t=>{
+  const f=fixture(t,{existing:true});
+  f.state.catalog={models:Array.from({length:9},(_,i)=>({slug:'fixture-'+i,display_name:'Fixture '+i,visibility:i<3?'list':'hide',supported_in_api:true}))};
+  const before=JSON.stringify(f.state.catalog),config=fs.readFileSync(f.configPath,'utf8');
+  const status=await f.manager.status();
+  assert.equal(status.gateway.models,3);assert.equal(status.gateway.totalModels,9);assert.equal(status.gateway.hiddenModels,6);
+  assert.equal(JSON.stringify(f.state.catalog),before);assert.equal(fs.readFileSync(f.configPath,'utf8'),config);
+});
 
 test('manager validates URL, credentials, action flags and scope without side effects',()=>{
   assert.equal(normalizeUrl('https://server.test:1234/'),'https://server.test:1234/v1');

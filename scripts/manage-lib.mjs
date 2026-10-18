@@ -8,6 +8,7 @@ import {randomUUID} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {runClient, validateCatalog} from './client-lib.mjs';
 import {remoteCommand} from './control-panel.mjs';
+import {summarizeCatalog} from './catalog-summary.mjs';
 
 const execute = promisify(execFile);
 export const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -134,7 +135,7 @@ export function createManager({codexHome,scope,repo=repository,nodePath=process.
     const headers={'x-caveman-gateway-key':key};
     const info=await fetchJson(fetchFn,c.upstreamUrl+'/stack-info',headers);
     if(info.capabilities?.compressionSwitch!==true)throw Error('SERVER_UPGRADE_REQUIRED');
-    const catalog=validateCatalog(await fetchJson(fetchFn,c.upstreamUrl+'/catalog',headers));return {ok:true,models:catalog.models.length};
+    const summary=summarizeCatalog(validateCatalog(await fetchJson(fetchFn,c.upstreamUrl+'/catalog',headers)));return {ok:true,models:summary.count,totalModels:summary.totalCount,hiddenModels:summary.hiddenCount};
   }
   async function bridge(c) {
     try{const b=await fetchJson(fetchFn,`http://127.0.0.1:${c.port}/healthz`);return {ok:b.service==='caveman-native-bridge'&&b.controlVersion===1&&normalizeUrl(b.upstreamUrl??b.upstream)===c.upstreamUrl,compression:b.compression};}
