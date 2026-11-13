@@ -32,11 +32,40 @@ test('invalid client authentication modes fail before creating a gateway',()=>{
     assert.throws(()=>createGateway({key,clientAuthMode}),/Invalid client authentication mode/);
 });
 
+test('gateway retains its default limit and permits an explicit 512 MiB limit',async t=>{
+  for(const maxRequestBytes of [undefined,536870912]){
+    let forwarded=0;
+    const gateway=createGateway({key,maxRequestBytes,request:()=>{forwarded++;throw Error('Unexpected upstream request');}});
+    t.after(()=>{gateway.closeAllConnections();gateway.close();});
+    gateway.listen(0,'127.0.0.1');await once(gateway,'listening');
+    const url=`http://127.0.0.1:${gateway.address().port}`;
+    const limit=maxRequestBytes??Number(process.env.MAX_REQUEST_BYTES||268435456);
+    assert.equal((await fetch(url+'/healthz').then(r=>r.json())).max_request_bytes,limit);
+    const refusal=await new Promise((resolve,reject)=>{
+      const req=http.request(url+'/v1/responses',{method:'POST',headers:{
+        'x-caveman-gateway-key':key,'content-length':String(limit+1)}},res=>{
+        let body='';res.on('data',chunk=>{body+=chunk;});res.on('error',reject);
+        res.on('end',()=>resolve({status:res.statusCode,body}));
+      });
+      req.on('error',reject);req.end();
+    });
+    assert.equal(refusal.status,413);
+    assert.equal(JSON.parse(refusal.body).error.limit_bytes,limit);
+    assert.equal(forwarded,0);
+  }
+});
+
+test('gateway rejects invalid limits and settings above 512 MiB',()=>{
+  for(const maxRequestBytes of [0,-1,536870913,1.5,NaN,Infinity])
+    assert.throws(()=>createGateway({key,maxRequestBytes}),/Invalid request limit/);
+});
+
 test('server authentication strips client credentials on compression and bypass routes without changing bodies or SSE',async t=>{
   const f=await fixture(t,1024,{clientAuthMode:'server'});
   const credentials={authorization:'Bearer client-fixture','chatgpt-account-id':'account-fixture',
     'x-api-key':'api-fixture','openai-organization':'org-fixture','openai-project':'project-fixture',
-    cookie:'session=fixture',cookie2:'session2=fixture'};
+    cookie:'session=fixture',cookie2:'session2=fixture','api-key':'legacy-key-fixture',
+    'x-oai-attestation':'caller-attestation','x-openai-agent-assertion':'caller-assertion'};
   const headers={...credentials,'x-caveman-gateway-key':key,'content-type':'application/json',
     'x-openai-subagent':'collab_spawn','x-codex-turn-metadata':'{"subagent_kind":"thread_spawn"}'};
   const body=JSON.stringify({input:'서버 인증 검증',stream:true});

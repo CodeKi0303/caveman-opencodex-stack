@@ -1,5 +1,13 @@
 # 변경 기록
 
+## 미출시 — OAuth 콜백·일괄 업데이트·SSH PC 관리
+
+- `./stack codex login` 브라우저 OAuth 폴백과 호스트 루프백 `1455:1456` 매핑. 로그인 동안만 릴레이를 실행하고 종료·취소·만료 시 정리.
+- 웹에서 여러 구성요소를 선택해 한 번에 빌드·검증·백업·전환. 선택하지 않은 제품 버전을 유지하며 SSH 연결 종료 후에도 서버 작업과 잠금을 유지.
+- SSH 대상과 설정 경로로 여러 Linux/WSL/Windows PC의 기존 로컬 제어 서비스를 관리. Pod 연결·압축·인증 모드 적용, 수동 카탈로그 동기화, 진단을 PC별 결과로 제공.
+- OpenCodex 2.100.2와 Bun 1.4.4 호환 기준, 누락된 Codex 식별자 전달, 서버 인증 모드의 클라이언트 attestation/assertion 제거.
+- Pod 실행·버전 조회·내부 프로세스의 `OCX_TELEMETRY=0`, `DO_NOT_TRACK=1`, `CAVEMAN_TELEMETRY=0` 강제 적용. 저장된 익명 텔레메트리 동의보다 환경변수 차단이 우선.
+
 ## 미출시 — Pod 내부 Codex 로그인 도구
 
 - `./stack codex login --device-auth`, `login status`, `--version`으로 컨테이너의 Codex 로그인과 설치 상태를 관리. 인수가 없으면 도움말을 표시하며 회사 CA 번들·터미널·표준 입력을 지원.

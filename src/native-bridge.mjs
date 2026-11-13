@@ -6,14 +6,18 @@ import {fileURLToPath} from 'node:url';
 import {Transform} from 'node:stream';
 
 const DEFAULT_LIMIT = 268435456;
+const MAX_LIMIT = 536870912;
+// Keep this bridge standalone: the installers copy this one module to CODEX_HOME.
+const clientAuthHeaders = ['authorization','chatgpt-account-id','x-api-key','api-key',
+  'openai-organization','openai-project','cookie','cookie2',
+  'x-oai-attestation','x-openai-agent-assertion'];
 const hopHeaders = ['connection','keep-alive','proxy-authenticate','proxy-authorization',
   'te','trailer','transfer-encoding','upgrade','host'];
 const requestDenied = new Set([...hopHeaders, 'x-caveman-gateway-key', 'x-caveman-compression', 'cookie',
   'forwarded','x-forwarded-for','x-forwarded-host','x-forwarded-proto']);
-const serverAuthRequestDenied = new Set([...requestDenied, 'authorization', 'chatgpt-account-id',
-  'x-api-key', 'openai-organization', 'openai-project', 'cookie2']);
-const responseDenied = new Set([...hopHeaders, 'x-caveman-gateway-key', 'authorization',
-  'chatgpt-account-id','x-api-key','cookie','set-cookie','location']);
+const serverAuthRequestDenied = new Set([...requestDenied, ...clientAuthHeaders]);
+const responseDenied = new Set([...hopHeaders, 'x-caveman-gateway-key', ...clientAuthHeaders,
+  'set-cookie','location']);
 const routes = new Map([
   ['/v1/models', new Set(['GET'])],
   ['/v1/catalog', new Set(['GET','HEAD'])],
@@ -77,7 +81,7 @@ export function createNativeBridge({upstreamUrl, key, maxRequestBytes = DEFAULT_
   clientAuthMode(initialClientAuthMode);
   if (typeof key !== 'string' || key.length < 32 || /[\r\n]/.test(key))
     throw Error('Bridge gateway key must be at least 32 characters without line breaks');
-  if (!Number.isSafeInteger(maxRequestBytes) || maxRequestBytes < 1 || maxRequestBytes > DEFAULT_LIMIT)
+  if (!Number.isSafeInteger(maxRequestBytes) || maxRequestBytes < 1 || maxRequestBytes > MAX_LIMIT)
     throw Error('Invalid bridge request limit');
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 3600000)
     throw Error('Invalid bridge upstream timeout');

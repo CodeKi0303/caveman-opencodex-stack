@@ -9,13 +9,14 @@ const settle=()=>new Promise(resolve=>setImmediate(resolve));
 const deferred=()=>{let resolve;const promise=new Promise(done=>{resolve=done;});return {promise,resolve};};
 function node(attributes=''){
  const handlers=new Map();let text='';
- return {textWrites:0,get textContent(){return text;},set textContent(value){text=value;this.textWrites++;},value:'',checked:false,hidden:/\bhidden\b/.test(attributes),disabled:false,readOnly:false,className:'',dataset:{},
+ return {textWrites:0,get textContent(){return text;},set textContent(value){text=value;this.textWrites++;},value:'',checked:false,hidden:/\bhidden\b/.test(attributes),disabled:false,readOnly:false,className:'',dataset:{},children:[],
+  append(...children){this.children.push(...children);},replaceChildren(...children){this.children=children;},
   addEventListener(name,callback){const callbacks=handlers.get(name)??[];callbacks.push(callback);handlers.set(name,callbacks);},
   async dispatch(name,event={}){for(const callback of handlers.get(name)??[])await callback({preventDefault(){},...event});},
   showModal(){this.open=true;}};
 }
 async function fixture({initialFailure=false}={}){
- const elements=new Map(),mutating=[],updates=[];
+ const elements=new Map(),mutating=[],updates=[],created=[];
  for(const tag of html.matchAll(/<[^!][^>]*>/g)){
   const id=/\bid="([^"]+)"/.exec(tag[0]);
   if(!id&&!/\bdata-mutating\b/.test(tag[0]))continue;
@@ -24,13 +25,15 @@ async function fixture({initialFailure=false}={}){
   const update=/\bdata-update="([^"]+)"/.exec(tag[0]);if(update){element.dataset.update=update[1];updates.push(element);}
  }
  const document=node(),window=node();document.hidden=false;
- document.getElementById=id=>{assert(elements.has(id),'HTML must provide '+id);return elements.get(id);};
+ const nested=values=>values.flatMap(value=>[value,...nested(value.children)]);
+ document.getElementById=id=>{const element=elements.get(id)??nested([...elements.values()]).find(value=>value.id===id);assert(element,'HTML must provide '+id);return element;};
+ document.createElement=()=>{const element=node();created.push(element);return element;};
  document.querySelector=selector=>{assert.equal(selector,'meta[name="control-token"]');return {content:'fixture-control-token'};};
  document.querySelectorAll=selector=>{assert(['[data-mutating]','[data-update]'].includes(selector));return selector==='[data-mutating]'?mutating:updates;};
  const timers=new Map();let sequence=0,activeRequests=0,maxActive=0;
  const calls=[],state={failure:initialFailure,hold:null,action:null,status:{
   ok:true,checkedAt:'2026-10-19T01:00:00.000Z',
-  settings:{upstreamUrl:'http://server.test/v1',compression:true,management:null},
+  capabilities:{remoteClientManagement:1},remoteClients:[],settings:{upstreamUrl:'http://server.test/v1',compression:true,clientAuthMode:'server',management:null},
   bridge:{ok:true},gateway:{ok:true},catalog:{count:9,modified:'2026-10-18T01:00:00.000Z'},
   authentication:{mode:'pool',source:'server'},alerts:[],job:null,busy:false,
  }};
@@ -177,4 +180,117 @@ for(const [component,label] of Object.entries({caveman:'Caveman CLI',opencodex:'
 test('Codex update is identified as the server Pod CLI rather than the Windows desktop app',()=>{
  assert.match(html,/<h3>Codex CLI<\/h3><p>서버 Pod · 메인 계정 로그인<\/p>/);
  assert.match(html,/Windows Codex 데스크톱 앱은 여기서 업데이트하지 않습니다/);
+});
+
+test('multiple selected components share one confirmation and one immutable update plan',async()=>{
+ const f=await fixture();
+ const versions={caveman:{current:'4.0.2',latest:'4.0.3'},opencodex:{current:'2.99.0',latest:'2.100.2'},codex:{current:'0.163.0',latest:'0.164.0'}};
+ f.state.status.job={id:'batch-versions',action:'check-update',status:'succeeded',result:{components:versions}};
+ await f.tick();
+ for(const component of ['opencodex','codex']){f.element(component+'-selected').checked=true;await f.element(component+'-selected').dispatch('change');}
+ assert.equal(f.element('update-selection-count').textContent,'2개 선택');
+ await f.tick();assert(f.element('opencodex-selected').checked);assert(f.element('codex-selected').checked);assert(!f.element('caveman-selected').checked);
+ await f.element('update-selected').dispatch('click');assert.equal(f.element('confirm').open,true);
+ assert.equal(f.element('confirm-detail').textContent,'OpenCodex 2.99.0 → 2.100.2\nCodex CLI (서버 Pod) 0.163.0 → 0.164.0');
+ assert.equal(f.calls.filter(call=>call.method==='POST').length,0);
+ f.element('opencodex-version').value='2.100.3';
+ f.element('confirm').returnValue='apply';await f.element('confirm').dispatch('close');await settle();
+ const posts=f.calls.filter(call=>call.method==='POST');assert.equal(posts.length,1);assert.equal(posts[0].url,'/api/update');
+ assert.deepEqual(JSON.parse(posts[0].body),{updates:[{component:'opencodex',version:'2.100.2'},{component:'codex',version:'0.164.0'}],confirm:true});
+ f.state.status.job={id:'batch-result',action:'update',status:'succeeded',result:{updates:[{component:'opencodex',version:'2.100.2'},{component:'codex',version:'0.164.0'}],message:'선택한 업데이트 완료'}};
+ await f.tick();assert.equal(f.element('opencodex-current').textContent,'2.100.2');assert.equal(f.element('codex-current').textContent,'0.164.0');assert.equal(f.element('caveman-current').textContent,'4.0.2');
+});
+
+test('batch selection rejects empty or invalid versions and cancel never submits',async()=>{
+ const f=await fixture();
+ await f.element('update-selected').dispatch('click');assert.match(f.element('notice-text').textContent,/1개 이상/);assert(!f.element('confirm').open);
+ await f.element('select-all-updates').dispatch('click');assert.equal(f.element('update-selection-count').textContent,'3개 선택');
+ await f.element('update-selected').dispatch('click');assert.match(f.element('notice-text').textContent,/버전/);assert(!f.element('confirm').open);
+ for(const component of ['caveman','opencodex','codex'])f.element(component+'-version').value='1.2.3';
+ await f.element('update-selected').dispatch('click');assert(f.element('confirm').open);
+ f.element('confirm').returnValue='cancel';await f.element('confirm').dispatch('close');await settle();
+ assert.equal(f.calls.filter(call=>call.method==='POST').length,0);
+});
+
+const remoteTargets=[
+ {id:'linux-pc',label:'작업 Linux',host:'worker@192.0.2.20',port:22,platform:'linux',configPath:'/home/worker/.codex/caveman-stack/native-bridge.json'},
+ {id:'windows-pc',label:'Windows PC',host:'user@192.0.2.21',port:2222,platform:'windows',configPath:'C:\\Users\\user\\.codex\\caveman-stack\\native-bridge.json',keyFile:'C:/keys/work',nodePath:'C:\\Program Files\\nodejs\\node.exe'}
+];
+async function remoteFixture(){const f=await fixture();f.state.status.remoteClients=structuredClone(remoteTargets);await f.tick();return f;}
+
+test('PC registry polling does not connect automatically or overwrite selections and edited registration fields',async()=>{
+ const f=await remoteFixture();assert.equal(f.element('remote-client-empty').hidden,true);assert.equal(f.element('remote-client-list').children.length,2);
+ f.element('remote-check-linux-pc').checked=true;await f.element('remote-check-linux-pc').dispatch('change');
+ await f.element('remote-edit-windows-pc').dispatch('click');assert.equal(f.element('remote-platform').value,'windows');assert.equal(f.element('remote-id').value,'windows-pc');
+ f.element('remote-config').value='C:\\Users\\different\\.codex\\config.toml';await f.element('remote-client-form').dispatch('input');
+ f.state.status.remoteClients[0].label='수정된 이름';await f.tick();
+ assert.equal(f.element('remote-config').value,'C:\\Users\\different\\.codex\\config.toml');assert.equal(f.element('remote-check-linux-pc').checked,true);
+ assert.equal(f.element('remote-selection-count').textContent,'1대 선택');assert(f.calls.every(call=>call.url==='/api/status'));
+ f.state.status.remoteClients.shift();await f.tick();assert.equal(f.element('remote-selection-count').textContent,'0대 선택');
+});
+
+test('registering and editing remote PCs sends paths and target metadata without Pod credentials',async()=>{
+ const f=await remoteFixture();await f.element('remote-reset').dispatch('click');
+ f.element('remote-host').value='wsl-work';f.element('remote-label').value='작업 WSL';f.element('remote-config').value='/home/me/.codex/config.toml';
+ await f.element('remote-client-form').dispatch('submit');
+ let posts=f.calls.filter(call=>call.method==='POST');assert.equal(posts[0].url,'/api/remote-clients');
+ assert.deepEqual(JSON.parse(posts[0].body),{target:{host:'wsl-work',label:'작업 WSL',platform:'linux',port:22,configPath:'/home/me/.codex/config.toml'}});
+ await f.element('remote-edit-windows-pc').dispatch('click');f.element('remote-label').value='새 Windows 이름';
+ await f.element('remote-client-form').dispatch('submit');posts=f.calls.filter(call=>call.method==='POST');
+ assert.deepEqual(JSON.parse(posts[1].body),{target:{...remoteTargets[1],label:'새 Windows 이름'}});
+ assert(!posts.some(call=>call.body.includes('gateway-key')||call.body.includes('auth.json')));
+});
+
+test('remote apply confirms selected PCs and saved settings, then sends one frozen target selection',async()=>{
+ const f=await remoteFixture();await f.element('remote-select-all').dispatch('click');assert.equal(f.element('remote-selection-count').textContent,'2대 선택');
+ await f.element('remote-apply').dispatch('click');assert.equal(f.element('remote-confirm').open,true);assert.match(f.element('remote-confirm-detail').textContent,/작업 Linux.*192\.0\.2\.20/);assert.match(f.element('remote-confirm-detail').textContent,/http:\/\/server\.test\/v1/);assert.match(f.element('remote-confirm-detail').textContent,/서버 계정/);
+ assert.equal(f.calls.filter(call=>call.method==='POST').length,0);
+ await f.element('remote-select-none').dispatch('click');f.element('remote-confirm').returnValue='apply';await f.element('remote-confirm').dispatch('close');
+ const posts=f.calls.filter(call=>call.method==='POST');assert.equal(posts.length,1);assert.equal(posts[0].url,'/api/remote-client-action');
+ assert.deepEqual(JSON.parse(posts[0].body),{action:'apply',ids:['linux-pc','windows-pc'],confirm:true});
+});
+
+test('remote apply rejects an empty selection or unsaved local settings and cancel does not run it',async()=>{
+ const f=await remoteFixture();await f.element('remote-apply').dispatch('click');assert.match(f.element('notice-text').textContent,/1대 이상/);
+ await f.element('remote-select-all').dispatch('click');await f.element('remote-apply').dispatch('click');f.element('remote-confirm').returnValue='cancel';await f.element('remote-confirm').dispatch('close');
+ f.element('upstream').value='http://unsaved.test/v1';await f.element('settings-form').dispatch('input');await f.element('remote-apply').dispatch('click');
+ assert.match(f.element('notice-text').textContent,/먼저.*저장/);assert.equal(f.calls.filter(call=>call.method==='POST').length,0);
+});
+
+test('remote status sync and diagnosis submit selected targets without changing their Pod configuration',async()=>{
+ const f=await remoteFixture();f.element('remote-check-linux-pc').checked=true;await f.element('remote-check-linux-pc').dispatch('change');
+ for(const action of ['status','sync','doctor'])await f.element('remote-'+action).dispatch('click');
+ const posts=f.calls.filter(call=>call.method==='POST');assert.equal(posts.length,3);
+ for(const [index,action] of ['status','sync','doctor'].entries())assert.deepEqual(JSON.parse(posts[index].body),{action,ids:['linux-pc']});
+ assert(posts.every(call=>call.url==='/api/remote-client-action'));assert(!f.element('remote-confirm').open);
+});
+
+test('removing a PC requires confirmation and only removes its local registration',async()=>{
+ const f=await remoteFixture();await f.element('remote-remove-linux-pc').dispatch('click');assert.match(f.element('remote-confirm-help').textContent,/설정 파일은 유지/);
+ f.element('remote-confirm').returnValue='cancel';await f.element('remote-confirm').dispatch('close');assert.equal(f.calls.filter(call=>call.method==='POST').length,0);
+ await f.element('remote-remove-linux-pc').dispatch('click');f.element('remote-confirm').returnValue='apply';await f.element('remote-confirm').dispatch('close');
+ const posts=f.calls.filter(call=>call.method==='POST');assert.equal(posts.length,1);assert.equal(posts[0].url,'/api/remote-clients');assert.deepEqual(JSON.parse(posts[0].body),{remove:'linux-pc'});
+});
+
+test('partial remote failures keep successful PC results visible and render remote names as text',async()=>{
+ const f=await remoteFixture();f.state.status.job={id:'remote-result',action:'remote-client-action',status:'failed',error:'REMOTE_CLIENTS_PARTIAL_FAILURE',result:{ok:false,action:'apply',results:[
+  {id:'linux-pc',label:'<img src=x onerror=alert(1)>',host:'worker@192.0.2.20',ok:true,result:{applied:true,upstreamUrl:'http://server.test/v1',compression:true,clientAuthMode:'server',bridge:{ok:true},gateway:{ok:true},catalog:{count:3},restartCodex:true}},
+  {id:'windows-pc',label:'Windows PC',host:'user@192.0.2.21',ok:false,error:'REMOTE_SSH_FAILED'}]}};
+ await f.tick();const result=f.element('job-result').textContent;
+ assert.match(result,/완료 1대 · 실패 1대/);assert.match(result,/<img src=x onerror=alert\(1\)>/);assert.match(result,/연결 설정을 적용했습니다/);assert.match(result,/Codex를 재시작/);assert.match(result,/Windows PC/);assert.match(result,/SSH 계정/);
+ assert.equal(f.element('notice-text').textContent,result);
+});
+
+test('client authentication selector follows saved settings and preserves unsaved choice during polling',async()=>{
+ const f=await fixture();assert.equal(f.element('client-auth-mode').value,'server');
+ f.element('client-auth-mode').value='forward';await f.element('settings-form').dispatch('change');await f.tick();assert.equal(f.element('client-auth-mode').value,'forward');
+ await f.element('settings-form').dispatch('submit');const post=f.calls.find(call=>call.url==='/api/settings');assert.equal(JSON.parse(post.body).clientAuthMode,'forward');
+});
+
+test('saving the registry locks controls and retains edits made while the request is pending',async()=>{
+ const f=await remoteFixture(),hold=deferred();f.state.actionHold=hold;
+ await f.element('remote-edit-linux-pc').dispatch('click');const saving=f.element('remote-client-form').dispatch('submit');await settle();await f.tick();assert(f.mutating.every(element=>element.disabled));
+ assert.equal(f.element('remote-check-linux-pc').disabled,true);
+ f.element('remote-label').value='계속 편집 중';await f.element('remote-client-form').dispatch('input');hold.resolve();await saving;
+ assert.equal(f.element('remote-label').value,'계속 편집 중');assert.equal(f.element('remote-id').value,'linux-pc');assert(f.mutating.every(element=>!element.disabled));
 });

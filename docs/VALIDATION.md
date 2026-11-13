@@ -95,3 +95,14 @@ Rootless/SELinux 조합, ARM64, 실제 회사 NTLM/Kerberos·proxy 장비, Windo
   복구: `./stack down` → 해당 파일을 `.env`로 복사 → 필요 시 `./stack up`.
 - 이번 변경에서는 실제 모델 추론을 재호출하지 않았으며 Windows 브라우저에서의 접속은 별도 확인 필요.
 - 현재 두 LAN 포트는 HTTP이며 관리 UI의 HTTPS는 별도 reverse proxy 구성이 필요함.
+# 2026-11-13 관리 기능 적용 검증
+
+- Windows Node: 202개 중 195 통과, 7 제외. Linux Node: 198 통과, 4 제외. Linux Python: 83개 통과. 제외 항목은 OS 전용·Caveman 바이너리 필요·Windows 심볼릭 링크 권한 조건이다.
+- 실제 Caveman 4.0.1 컨테이너에서 세션/요청 식별자·본문 client_metadata·추론 포함/턴 상태/할당량 응답 헤더를 검증했다.
+- 운영 업데이트: OpenCodex 2.100.2 + Bun 1.4.4. Caveman 4.0.1과 Pod Codex 0.166.0은 보존했다.
+- 실제 Podman `127.0.0.1:1455:1456` 경로에서 합성 콜백 응답과 릴레이 종료를 검증했다. 새로운 OAuth 계정 승인은 실행하지 않았으며 기존 로그인은 유효하다.
+- 서버 계정으로 실제 Responses SSE 완료, Caveman 압축, 66,392바이트 원문의 DB·HTTP MCP 일치 복구를 확인했다.
+- 실행 중인 OpenCodex 동의 판정에 `accepted` 입력을 주어도 환경변수 우선으로 `effective:false`가 반환됐다.
+- Windows 제어 API에서 Linux SSH 대상의 상태·설정 적용·카탈로그 동기화·진단을 수행했다. 호스트와 Windows OAuth 파일은 유지됐다.
+- 세 구성요소 일괄 요청의 동일 버전 건너뛰기를 실서버에서 확인했다. 변경 버전의 단일 빌드와 연결 중단 시 잠금 유지·독립 작업 완료는 자동 테스트로 검증했다.
+- 이 세션의 Codex 브라우저 연결은 제공되지 않았다. 시각적 레이아웃의 수동 확인은 포함하지 않으며 UI 이벤트·폼·선택 보존 테스트 및 실제 HTTP API로 검증했다.

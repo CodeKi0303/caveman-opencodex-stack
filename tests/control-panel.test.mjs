@@ -11,12 +11,12 @@ import {fileURLToPath} from 'node:url';
 import {createControlPanel,remoteCommand,validateManagement} from '../scripts/control-panel.mjs';
 const repo=fs.realpathSync(fileURLToPath(new URL('..',import.meta.url)));
 
-async function fixture(t,{management,platform}={}){
+async function fixture(t,{management,platform,remoteClients}={}){
  const home=fs.mkdtempSync(path.join(os.tmpdir(),'caveman-control-')),dir=path.join(home,'caveman-stack');fs.mkdirSync(dir);
  const key='private-test-key-'.repeat(4),keyFile=path.join(dir,'key');fs.writeFileSync(keyFile,key);
  const configPath=path.join(dir,'native-bridge.json');fs.writeFileSync(configPath,JSON.stringify({upstreamUrl:'http://server.test/v1',keyFile,port:18788,...(management?{management}:{})}));
  const calls=[],state={};
- const server=createControlPanel({configPath,platform,fetchFn:async(url,opts)=>{
+ const server=createControlPanel({configPath,platform,remoteClients,fetchFn:async(url,opts)=>{
   if(url.endsWith('/healthz')){if(state.bridgeDown)throw Error('private bridge detail');return Response.json({service:'caveman-native-bridge',controlVersion:1});}
   if(state.reject)return new Response('',{status:401});
   assert(opts.headers['x-caveman-gateway-key']);return Response.json({capabilities:{compressionSwitch:true}});
@@ -106,6 +106,48 @@ test('failed authentication or client update preserves old connection and remove
  f.state.reject=false;f.state.clientFails=true;const response=await f.call('settings',body);assert.equal(response.status,400);assert(!(await response.text()).includes('fixture secret'));
  assert.deepEqual(JSON.parse(fs.readFileSync(f.configPath)),JSON.parse(before));assert.equal(fs.readdirSync(f.dir).filter(f=>f.startsWith('gateway-key-')).length,0);
 });
+
+test('remote client registry and actions keep local credentials private and preserve per-PC failures',async t=>{
+ const remoteCalls=[],f=await fixture(t,{remoteClients:async(targets,ids,action,settings)=>{
+  remoteCalls.push({targets,ids,action,settings});
+  return {ok:false,action,results:ids.map((id,i)=>({id,ok:i===0,...(i?{error:'REMOTE_SSH_FAILED'}:{result:{ok:true,applied:true}})}))};
+ }});
+ const before=fs.readFileSync(f.configPath,'utf8');
+ const registered=[];
+ for(const host of ['me@client-a.test','me@client-b.test']){
+  const response=await f.call('remote-clients',{target:{host,configPath:'/home/me/.codex/config.toml'}});
+  assert.equal(response.status,200);registered.push((await response.json()).remoteClients.at(-1));
+ }
+ assert.equal(registered[0].configPath,'/home/me/.codex/caveman-stack/native-bridge.json');
+ assert.equal(fs.readFileSync(f.configPath,'utf8'),before);
+ let status=await f.call('status').then(r=>r.json());
+ assert.equal(status.capabilities.remoteClientManagement,1);assert.equal(status.remoteClients.length,2);assert(!JSON.stringify(status).includes(f.key));
+ const ids=registered.map(t=>t.id);
+ for(const body of [{action:'shell',ids},{action:'apply',ids},{action:'status',ids:['unknown']},{action:'sync',ids:[ids[0],ids[0]]}]){
+  assert.equal((await f.call('remote-client-action',body)).status,400);
+ }
+ assert.equal(remoteCalls.length,0);
+ assert.equal((await f.call('remote-client-action',{action:'apply',ids,confirm:true})).status,202);
+ await new Promise(r=>setTimeout(r,15));status=await f.call('status').then(r=>r.json());
+ assert.equal(remoteCalls.length,1);assert.equal(remoteCalls[0].settings.key,f.key);assert.equal(remoteCalls[0].settings.upstreamUrl,'http://server.test/v1');
+ assert.equal(status.job.status,'failed');assert.equal(status.job.result.results.length,2);assert(status.job.result.results[0].ok);
+ assert(!JSON.stringify(status).includes(f.key));
+ assert.equal((await f.call('remote-clients',{remove:ids[0]})).status,200);
+ assert.equal((await f.call('status').then(r=>r.json())).remoteClients.length,1);
+ assert.equal(fs.readFileSync(f.configPath,'utf8'),before);
+});
+
+test('remote configuration applies authentication mode without touching management or OAuth',async t=>{
+ const f=await fixture(t,{management:{mode:'local',repo},platform:'linux'});
+ fs.writeFileSync(path.join(f.home,'auth.json'),'private-login-fixture');
+ const body={upstreamUrl:'http://server.test/v1',compression:false,clientAuthMode:'server'};
+ assert.equal((await f.call('settings',{...body,clientAuthMode:'invalid'})).status,400);
+ assert.equal((await f.call('settings',body)).status,200);
+ const config=JSON.parse(fs.readFileSync(f.configPath));
+ assert.equal(config.clientAuthMode,'server');assert.deepEqual(config.management,{mode:'local',repo});
+ assert.equal((await f.call('status').then(r=>r.json())).settings.clientAuthMode,'server');
+ assert.equal(fs.readFileSync(path.join(f.home,'auth.json'),'utf8'),'private-login-fixture');
+});
 test('updates need a valid fixed component, semantic version and explicit confirmation',async t=>{
  const f=await fixture(t);
  for(const body of [{component:'shell',version:'1.2.3',confirm:true},{component:'caveman',version:'$(id)',confirm:true},{component:'caveman',version:'1.2.3'}])assert.equal((await f.call('update',body)).status,400);
@@ -113,6 +155,21 @@ test('updates need a valid fixed component, semantic version and explicit confir
   assert.equal((await f.call('update',{component,version:'1.2.3',confirm:true})).status,202);
   await new Promise(r=>setTimeout(r,20));assert.equal((await f.call('status').then(r=>r.json())).job.status,'succeeded');assert.deepEqual(f.calls.at(-1),{a:'update',args:{component,version:'1.2.3'}});
  }
+});
+
+test('batch updates validate the entire selection and launch one server operation',async t=>{
+ const f=await fixture(t),updates=[{component:'opencodex',version:'2.100.2'},{component:'codex',version:'0.164.0'}];
+ for(const body of [
+  {updates:[],confirm:true},{updates:null,confirm:true},{updates:[updates[0],updates[0]],confirm:true},
+  {updates:[...updates,...updates],confirm:true},{updates:[{component:'codex',version:123}],confirm:true},
+  {updates:[{component:'shell',version:'1.2.3'}],confirm:true},{updates:[{...updates[0],command:'id'}],confirm:true},
+  {updates,component:'caveman',version:'1.2.3',confirm:true},{updates},
+ ])assert.equal((await f.call('update',body)).status,400);
+ assert.deepEqual(f.calls,[]);
+ assert.equal((await f.call('update',{updates,confirm:true})).status,202);
+ await new Promise(r=>setTimeout(r,20));
+ assert.deepEqual(f.calls,[{a:'update',args:{updates}}]);
+ assert.equal((await f.call('status').then(r=>r.json())).job.status,'succeeded');
 });
 test('Linux direct management is bound to the running repository and cannot be enabled or redirected by the web form',async t=>{
  const local={mode:'local',repo},f=await fixture(t,{management:local,platform:'linux'});
@@ -158,6 +215,11 @@ test('direct management launches only the fixed Python helper with JSON stdin an
  assert.equal(f.calls.length,1);
  await remoteCommand(settings,'update',{component:'codex',version:'0.163.0'}, {platform:'linux',spawnFn:f.spawnFn});
  assert.deepEqual(JSON.parse(f.calls[1].input),{repo,action:'update',component:'codex',version:'0.163.0'});
+ const updates=[{component:'caveman',version:'4.0.3'},{component:'opencodex',version:'2.100.2'}];
+ await remoteCommand(settings,'update',{updates}, {platform:'linux',spawnFn:f.spawnFn});
+ assert.deepEqual(JSON.parse(f.calls[2].input),{repo,action:'update',updates});
+ assert.throws(()=>remoteCommand(settings,'update',{updates:[updates[0],updates[0]]},{platform:'linux',spawnFn:f.spawnFn}),/INVALID_UPDATE_SELECTION/);
+ assert.equal(f.calls.length,3);
 });
 test('direct management errors and timeout are sanitized, while legacy SSH keeps strict host verification',async t=>{
  const settings={upstreamUrl:'http://server.test/v1',management:{mode:'local',repo}};

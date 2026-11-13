@@ -71,11 +71,16 @@ def up(c):
     ident=pod('image','inspect',image_id(c),'--format','{{.Id}}',capture_output=True,text=True).stdout.strip()
     (ROOT/'data/active-image').write_text(ident+'\n');print('Stack ready')
 
+def telemetry_env():
+    # This deployment never opts in to upstream anonymous telemetry, including
+    # fresh state and dependency resolver containers. Ignore .env opt-in values.
+    return ['--env','OCX_TELEMETRY=0','--env','DO_NOT_TRACK=1','--env','CAVEMAN_TELEMETRY=0']
+
 def runtime_env(c):
     if c.get('CLIENT_AUTH_MODE','forward') not in ('forward','server'):
         raise RuntimeError('CLIENT_AUTH_MODE must be forward or server')
     allowed={'HTTP_PROXY','HTTPS_PROXY','NO_PROXY','ALLOWED_CIDRS','MAX_REQUEST_BYTES','CAVEMAN_MODE','CLIENT_AUTH_MODE','GATEWAY_TLS_CERT','GATEWAY_TLS_KEY'}
-    return [a for k,v in c.items() if k in allowed and v for a in ['--env',k+'='+v]]
+    return [a for k,v in c.items() if k in allowed and v for a in ['--env',k+'='+v]]+telemetry_env()
 
 def build_env(c):
     e=os.environ.copy()
@@ -104,6 +109,14 @@ def down(c):
         pod('stop','--time','30',name(c),stdout=subprocess.DEVNULL)
         pod('rm',name(c),stdout=subprocess.DEVNULL)
 
+def oauth_port(c):
+    # The callback is never published on the LAN, even when the model API is.
+    value=c.get('CODEX_OAUTH_PORT','1455')
+    if value=='':return None
+    if not re.fullmatch(r'[0-9]+',str(value)) or not 1<=int(value)<=65535:
+        raise RuntimeError('CODEX_OAUTH_PORT must be a TCP port or empty to disable browser login')
+    return int(value)
+
 def launch(c,image=None,container=None,state=None,publish=True):
     n=container or name(c);state=state or ROOT/'data/state';state.mkdir(parents=True,exist_ok=True,mode=0o700)
     if exists(n):raise RuntimeError('Container already exists; use status or down first')
@@ -116,6 +129,9 @@ def launch(c,image=None,container=None,state=None,publish=True):
     if publish and c.get('ADMIN_PORT'):
         admin_address=c.get('ADMIN_BIND_ADDRESS') or c['BIND_ADDRESS']
         args+=['--publish',f"{admin_address}:{c['ADMIN_PORT']}:10100"]
+    callback_port=oauth_port(c)
+    if publish and callback_port is not None:
+        args+=['--publish',f'127.0.0.1:{callback_port}:1456']
     pod(*args,image or image_id(c),stdout=subprocess.DEVNULL)
     try:
         for _ in range(45):
@@ -146,13 +162,26 @@ def container_codex(c,args):
     # Login helper: preserve the native Codex configuration/auth location. Do
     # not inject model routing, credentials, workspaces, or sandbox overrides.
     # Reuse the CA bundle prepared by the running supervisor for corporate TLS.
+    browser_login=bool(args and args[0]=='login' and not any(
+        arg in ('status','--device-auth','--with-api-key','--help','-h') for arg in args[1:]))
+    if browser_login:
+        callback_port=oauth_port(c)
+        if callback_port is None:
+            raise RuntimeError('Browser login is disabled. Set CODEX_OAUTH_PORT=1455 and recreate the container, or use ./stack codex login --device-auth')
+        mapping=pod('port',name(c),'1456/tcp',capture_output=True,text=True,check=False)
+        if mapping.returncode!=0 or mapping.stdout.strip()!=f'127.0.0.1:{callback_port}':
+            raise RuntimeError('OAuth callback port is not published as configured. Recreate the container with the updated stack before ./stack codex login')
+        print(f'Browser OAuth callback: host 127.0.0.1:{callback_port} -> container 1456 -> Codex localhost:1455.',flush=True)
+        print(f'For a remote server, open an SSH tunnel from the browser PC: ssh -N -L 1455:127.0.0.1:{callback_port} USER@SERVER',flush=True)
     entry='''if [ -s /state/company-ca-bundle.pem ]; then
 export NODE_EXTRA_CA_CERTS=/state/company-ca-bundle.pem
+export CODEX_CA_CERTIFICATE=/state/company-ca-bundle.pem
 export SSL_CERT_FILE=/state/company-ca-bundle.pem
 export CURL_CA_BUNDLE=/state/company-ca-bundle.pem
 fi
-exec /app/node_modules/.bin/codex "$@"
 '''
+    entry+=('exec node /app/scripts/codex-oauth-login.mjs "$@"\n' if browser_login
+            else 'exec /app/node_modules/.bin/codex "$@"\n')
     flags=['-i',*(['-t'] if sys.stdin.isatty() and sys.stdout.isatty() else [])]
     result=pod('exec',*flags,name(c),'/bin/sh','-c',entry,'stack-codex',*(args or ['--help']),check=False)
     return result.returncode
@@ -266,7 +295,7 @@ console.log(JSON.stringify(versions));
     try:
         result=pod('run','--rm','--name',container,'--label','io.caveman-stack.resolver='+owner,
             '--network',c.get('BUILD_NETWORK','slirp4netns'),
-            '--volume',str(stage)+':/work:Z','--workdir','/work',*proxy,*extra,
+            '--volume',str(stage)+':/work:Z','--workdir','/work',*proxy,*extra,*telemetry_env(),
             '--entrypoint','node',image,'-e',script,json.dumps(LATEST_PACKAGES),
             env=build_env(c),capture_output=True,text=True,timeout=300)
     finally:

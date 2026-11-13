@@ -5,18 +5,18 @@ import {timingSafeEqual, createHash} from 'node:crypto';
 import {readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {Transform} from 'node:stream';
+import {clientAuthHeaders} from './client-auth-headers.mjs';
 
-// Match OpenCodex's bounded raw/decoded JSON ingress limit. The startup script
-// reads this same file for Caveman, whose built-in default is only 32 MiB.
+// Keep OpenCodex's 256 MiB default, with its supported 512 MiB opt-in ceiling.
+// The supervisor also passes MAX_REQUEST_BYTES to Caveman.
 export const MAX_REQUEST_BYTES = Number(process.env.MAX_REQUEST_BYTES || 268435456);
+const MAX_LIMIT = 536870912;
 function validateLimit(value) {
-  if (!Number.isSafeInteger(value) || value < 1 || value > 268435456) throw Error('Invalid request limit');
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_LIMIT) throw Error('Invalid request limit');
 }
 const deniedHeaders = new Set(['connection','keep-alive','proxy-authenticate','proxy-authorization',
   'te','trailer','transfer-encoding','upgrade','host','x-caveman-gateway-key','x-caveman-compression',
   'forwarded','x-forwarded-for','x-forwarded-host','x-forwarded-proto']);
-const clientAuthHeaders = ['authorization','chatgpt-account-id','x-api-key',
-  'openai-organization','openai-project','cookie','cookie2'];
 export function addressPolicy(cidrs = '') {
   if (!cidrs.trim()) return () => true;
   const list = new BlockList();
@@ -159,7 +159,9 @@ export function createGateway({key, request = http.request, audit = () => {}, ma
       headers:upstreamHeaders}, response => {
       if (rejected || res.destroyed || res.writableEnded) { response.destroy(); return; }
       metadata.upstream_status = response.statusCode ?? 502;
-      res.writeHead(response.statusCode ?? 502, cleanHeaders(response.headers));
+      const responseHeaders=cleanHeaders(response.headers);
+      for (const name of [...clientAuthHeaders,'set-cookie']) delete responseHeaders[name];
+      res.writeHead(response.statusCode ?? 502, responseHeaders);
       response.pipe(res);
       response.on('error', () => res.destroy());
     });

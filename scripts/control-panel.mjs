@@ -6,8 +6,23 @@ import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {runClient} from './client-lib.mjs';
 import {summarizeCatalog} from './catalog-summary.mjs';
+import {validateRemoteTarget,validateRemoteTargets,runRemoteClients} from './remote-clients.mjs';
 const directory=path.dirname(fileURLToPath(import.meta.url));
 const updateComponents=['caveman','opencodex','codex'];
+export function validateUpdatePlan(value){
+ if(!value||typeof value!=='object'||Array.isArray(value))throw Error('INVALID_UPDATE_SELECTION');
+ const batch=Object.hasOwn(value,'updates');
+ if(batch&&(Object.hasOwn(value,'component')||Object.hasOwn(value,'version')))throw Error('INVALID_UPDATE_SELECTION');
+ const updates=batch?value.updates:[{component:value.component,version:value.version}];
+ if(!Array.isArray(updates)||updates.length<1||updates.length>updateComponents.length)throw Error('INVALID_UPDATE_SELECTION');
+ const seen=new Set();
+ return updates.map(item=>{
+  if(!item||typeof item!=='object'||Array.isArray(item)||Object.keys(item).some(k=>!['component','version'].includes(k))||
+    !updateComponents.includes(item.component)||typeof item.version!=='string'||!/^\d+\.\d+\.\d+$/.test(item.version))throw Error('INVALID_VERSION');
+  if(seen.has(item.component))throw Error('INVALID_UPDATE_SELECTION');seen.add(item.component);
+  return {component:item.component,version:item.version};
+ });
+}
 const read=file=>JSON.parse(fs.readFileSync(file,'utf8'));
 function atomic(file,value){const tmp=file+'.tmp-'+randomUUID();try{fs.writeFileSync(tmp,JSON.stringify(value,null,2)+'\n',{mode:0o600,flag:'wx'});fs.renameSync(tmp,file);}finally{if(fs.existsSync(tmp))fs.unlinkSync(tmp);}}
 function validUrl(value){const u=new URL(value);if(!['http:','https:'].includes(u.protocol)||u.username||u.password||u.search||u.hash||!['/v1','/v1/'].includes(u.pathname))throw Error('INVALID_URL');u.pathname='/v1';return u.href;}
@@ -25,8 +40,8 @@ export function validateManagement(value,{platform=process.platform}={}){
  return {host:value.host,keyFile:value.keyFile,repo:value.repo};
 }
 export function remoteCommand(settings,action,args={}, {platform=process.platform,spawnFn=spawn,timeoutMs=action==='status'?8000:40*60*1000}={}){
- if(!['status','check','catalog','update'].includes(action)||!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).some(name=>action!=='update'||!['component','version'].includes(name)))throw Error('INVALID_SERVER_ACTION');
- if(action==='update'&&(!updateComponents.includes(args.component)||!/^\d+\.\d+\.\d+$/.test(args.version??'')))throw Error('INVALID_VERSION');
+ if(!['status','check','catalog','update'].includes(action)||!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).some(name=>action!=='update'||!['component','version','updates'].includes(name)))throw Error('INVALID_SERVER_ACTION');
+ if(action==='update')validateUpdatePlan(args);
  const m=validateManagement(settings.management,{platform});
  if(!m)throw Error('SSH_NOT_CONFIGURED');
  const local=m.mode==='local';
@@ -42,14 +57,16 @@ export function remoteCommand(settings,action,args={}, {platform=process.platfor
   child.stdin.on('error',()=>{});child.stdin.end(JSON.stringify({repo:m.repo,action,...args}));
  });
 }
-export function createControlPanel({configPath,fetchFn=fetch,client=runClient,remote=remoteCommand,platform=process.platform}={}){
+export function createControlPanel({configPath,fetchFn=fetch,client=runClient,remote=remoteCommand,remoteClients=runRemoteClients,platform=process.platform}={}){
  configPath=path.resolve(configPath);
  const home=path.dirname(path.dirname(configPath));
  const csrf=randomBytes(32).toString('hex');
  let job=null,busy=false;
  const settings=()=>read(configPath);
+ const targetsPath=path.join(path.dirname(configPath),'remote-clients.json');
+ const targets=()=>fs.existsSync(targetsPath)?validateRemoteTargets(read(targetsPath).targets,{checkKeyFile:false}):[];
  const key=c=>fs.readFileSync(c.keyFile,'utf8').trim();
- const safeSettings=c=>({upstreamUrl:c.upstreamUrl,compression:c.compression!==false,keyConfigured:fs.existsSync(c.keyFile),bridgeUrl:`http://127.0.0.1:${c.port}/v1`,management:c.management??null});
+ const safeSettings=c=>({upstreamUrl:c.upstreamUrl,compression:c.compression!==false,clientAuthMode:c.clientAuthMode??'forward',keyConfigured:fs.existsSync(c.keyFile),bridgeUrl:`http://127.0.0.1:${c.port}/v1`,management:c.management??null});
  const json=(res,status,value)=>res.writeHead(status,{'content-type':'application/json; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff'}).end(JSON.stringify(value));
  async function gateway(c,suffix,timeoutMs=15000){const r=await fetchFn(c.upstreamUrl+suffix,{headers:{'x-caveman-gateway-key':key(c)},redirect:'error',signal:AbortSignal.timeout(timeoutMs)});if(!r.ok)throw Error(r.status===401?'GATEWAY_KEY_REJECTED':'GATEWAY_UNAVAILABLE');return r.json();}
  let statusPending;
@@ -73,13 +90,17 @@ export function createControlPanel({configPath,fetchFn=fetch,client=runClient,re
   let catalog={count:0,totalCount:0,hiddenCount:0};try{const file=path.join(home,'opencodex-catalog.json'),data=read(file);if(!Array.isArray(data.models))throw Error();catalog={...summarizeCatalog(data),modified:fs.statSync(file).mtime.toISOString()};}catch{}
   if(catalog.totalCount===0)alerts.push({id:'catalog-empty',severity:'warning',message:'로컬 모델 목록이 비어 있습니다. 모델 목록 동기화를 실행하세요.'});
   else if(catalog.count===0)alerts.push({id:'catalog-no-selectable',severity:'warning',message:'선택 가능한 로컬 모델이 없습니다. OpenCodex에서 사용할 모델을 선택한 뒤 모델 목록을 동기화하세요.'});
-  return {ok:true,checkedAt:new Date().toISOString(),settings:safeSettings(c),bridge,gateway:gatewayState,authentication,alerts,catalog,job,busy};
+  return {ok:true,checkedAt:new Date().toISOString(),capabilities:{remoteClientManagement:1},remoteClients:targets(),settings:safeSettings(c),bridge,gateway:gatewayState,authentication,alerts,catalog,job,busy};
  }
  function status(){return statusPending??=readStatus().finally(()=>{statusPending=undefined;});}
  async function save(body){
   const before=settings(),next={...before};
   next.upstreamUrl=validUrl(body.upstreamUrl);
   if(typeof body.compression!=='boolean')throw Error('INVALID_COMPRESSION');next.compression=body.compression;
+  if(body.clientAuthMode!==undefined){
+   if(!['forward','server'].includes(body.clientAuthMode))throw Error('INVALID_CLIENT_AUTH_MODE');
+   next.clientAuthMode=body.clientAuthMode;
+  }
   if(before.management?.mode==='local'){
    const local=validateManagement(before.management,{platform});
    if(next.upstreamUrl!==validUrl(before.upstreamUrl))throw Error('LOCAL_MANAGEMENT_LOCKED');
@@ -105,16 +126,41 @@ export function createControlPanel({configPath,fetchFn=fetch,client=runClient,re
    return {ok:true,message:'연결 설정을 저장했습니다. 새 요청부터 적용됩니다. Pod 주소·키를 바꿨다면 Codex를 재시작해 복구 MCP 설정도 반영하세요.'};
   }catch(error){if(newKey&&settings().keyFile!==newKey)fs.rmSync(newKey,{force:true});throw error;}
  }
+ function saveTarget(body){
+  const before=targets();let next;
+  if(Object.hasOwn(body,'remove')){
+   if(Object.hasOwn(body,'target')||typeof body.remove!=='string'||!before.some(t=>t.id===body.remove))throw Error('INVALID_REMOTE_TARGET');
+   next=before.filter(t=>t.id!==body.remove);
+  }else{
+   const target=validateRemoteTarget(body.target);
+   next=before.some(t=>t.id===target.id)?before.map(t=>t.id===target.id?target:t):[...before,target];
+  }
+  next=validateRemoteTargets(next,{checkKeyFile:false});
+  if(fs.existsSync(targetsPath)){
+   const backup=path.join(path.dirname(configPath),'control-backups');fs.mkdirSync(backup,{recursive:true,mode:0o700});
+   fs.copyFileSync(targetsPath,path.join(backup,'remote-clients-'+randomUUID()+'.json'));
+  }
+  atomic(targetsPath,{targets:next});return {ok:true,remoteClients:next};
+ }
+ function validateRemoteAction(body){
+  if(!['status','apply','sync','doctor'].includes(body.action)||!Array.isArray(body.ids)||!body.ids.length||
+    new Set(body.ids).size!==body.ids.length||body.ids.some(id=>typeof id!=='string'||!targets().some(t=>t.id===id)))throw Error('INVALID_REMOTE_SELECTION');
+  if(body.action==='apply'&&body.confirm!==true)throw Error('REMOTE_CONFIRMATION_REQUIRED');
+ }
  function startJob(action,body){
   busy=true;job={id:randomUUID(),action,status:'running',started:new Date().toISOString()};
   const c=settings();
   (async()=>{
-   if(action==='sync'||action==='doctor'){
+   if(action==='remote-client-action'){
+    job.result=await remoteClients(targets(),body.ids,body.action,body.action==='apply'?{
+     upstreamUrl:c.upstreamUrl,key:key(c),compression:c.compression!==false,clientAuthMode:c.clientAuthMode??'forward'}:undefined);
+    if(!job.result.ok)throw Error('REMOTE_CLIENTS_PARTIAL_FAILURE');
+   }else if(action==='sync'||action==='doctor'){
     const result=await client([action==='sync'?'sync':'doctor','--url',c.upstreamUrl,'--key-file',c.keyFile,'--codex-home',home,...(action==='doctor'?['--provider','openai','--bridge-url',`http://127.0.0.1:${c.port}/v1`]:[])]);
     job.result=action==='sync'?{ok:result.ok,changed:result.catalogChanged,restartCodex:result.restartCodex,warnings:result.warnings}:result;
     if(!result.ok)throw Error('DOCTOR_FAILED');
    }else{
-    job.result=await remote(c,action==='check-update'?'check':action==='refresh-server-catalog'?'catalog':'update',action==='update'?{component:body.component,version:body.version}:{});
+    job.result=await remote(c,action==='check-update'?'check':action==='refresh-server-catalog'?'catalog':'update',action==='update'?(Object.hasOwn(body,'updates')?{updates:validateUpdatePlan(body)}:{component:body.component,version:body.version}):{});
    }
    job.status='succeeded';
   })().catch(error=>{job.status='failed';job.error=/^[A-Z_]+$/.test(error.code??error.message)?(error.code??error.message):'OPERATION_FAILED';}).finally(()=>{job.finished=new Date().toISOString();busy=false;});
@@ -133,7 +179,7 @@ export function createControlPanel({configPath,fetchFn=fetch,client=runClient,re
   if(req.headers['x-control-token']!==csrf)return json(res,403,{error:'CONTROL_TOKEN_REQUIRED'});
   try{
    if(req.method==='GET'&&req.url==='/api/status')return json(res,200,await status());
-   if(req.method!=='POST'||!['/api/settings','/api/sync','/api/doctor','/api/check-update','/api/update','/api/refresh-server-catalog'].includes(req.url))return json(res,404,{error:'NOT_FOUND'});
+   if(req.method!=='POST'||!['/api/settings','/api/sync','/api/doctor','/api/check-update','/api/update','/api/refresh-server-catalog','/api/remote-clients','/api/remote-client-action'].includes(req.url))return json(res,404,{error:'NOT_FOUND'});
    if(busy)return json(res,409,{error:'OPERATION_BUSY'});
    if(req.headers['content-type']!=='application/json')return json(res,415,{error:'JSON_REQUIRED'});
    let bytes=0,chunks=[];for await(const chunk of req){bytes+=chunk.length;if(bytes>16384)return json(res,413,{error:'BODY_TOO_LARGE'});chunks.push(chunk);}
@@ -141,7 +187,9 @@ export function createControlPanel({configPath,fetchFn=fetch,client=runClient,re
    if(!body||typeof body!=='object'||Array.isArray(body))throw Error('INVALID_INPUT');
    if(busy)return json(res,409,{error:'OPERATION_BUSY'});
    if(req.url==='/api/settings'){busy=true;try{return json(res,200,await save(body));}finally{busy=false;}}
-   if(req.url==='/api/update'&&(!updateComponents.includes(body.component)||!/^\d+\.\d+\.\d+$/.test(body.version??'')))throw Error('INVALID_VERSION');
+   if(req.url==='/api/remote-clients')return json(res,200,saveTarget(body));
+   if(req.url==='/api/remote-client-action')validateRemoteAction(body);
+   if(req.url==='/api/update')validateUpdatePlan(body);
    if(req.url==='/api/update'&&body.confirm!==true)throw Error('UPDATE_CONFIRMATION_REQUIRED');
    return json(res,202,startJob(req.url.slice(5),body));
   }catch(error){const code=error.code??error.message;json(res,400,{ok:false,error:/^[A-Z_]+$/.test(code)?code:'OPERATION_FAILED'});}

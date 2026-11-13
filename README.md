@@ -10,6 +10,14 @@ Windows/WSL Codex는 HTTP(S)로 접속하므로 작업 파일과 도구 실행�
 본인의 Windows·WSL·Linux 클라이언트가 같은 OpenCodex 계정 풀과 압축 원문 DB를 공유합니다.
 새 설치의 OpenCodex 계정 선택 모드는 **`pool`**입니다. 기존 설치의 모드는 자동으로 바꾸지 않습니다.
 
+웹 제어 페이지에서는 Caveman·OpenCodex·Pod의 Codex를 **여러 개 선택해 한 번에 업데이트**할 수 있습니다.
+**SSH PC 관리**에 대상 PC와 Codex 설정 경로를 등록하면 선택한 PC의 Pod 연결·압축·인증 모드 적용,
+카탈로그 동기화와 진단을 실행합니다. [여러 PC 관리](docs/REMOTE-CLIENTS.md)
+
+디바이스 인증이 어려우면 `./stack codex login`으로 브라우저 OAuth를 사용합니다.
+기본 콜백 포트는 **`127.0.0.1:1455:1456`**이며 원격 서버에서는 SSH 터널이 필요합니다.
+[로그인 절차](docs/OAUTH-LOGIN.md) · [OpenCodex 2.100.2 호환·텔레메트리 정책](docs/OPENCODEX-COMPATIBILITY.md)
+
 ```text
 Windows / WSL / Linux Codex (본인의 로그인 유지)
     │ 게이트웨이 키 + 기존 모델 인증 (server 모드는 게이트웨이 키만)
@@ -65,9 +73,12 @@ cd caveman-podman
 
 메뉴 **1 → 설치 방식 선택 → 표시되는 질문에 답하기**로 진행합니다. 새 전체 서버는 키를 자동으로 만들고
 연결하며, 기존 서버 연결의 키는 숨김 입력 또는 키 파일 선택으로 받습니다. 포트는 추천값을 사용할 수 있습니다.
-로그인과 연결 진단이 끝나면 **10번 `Codex 실행`**으로 바로 작업을 시작합니다. 저장소에 준비된 Codex CLI를
-사용하므로 전역 `codex` 명령을 따로 설치하거나 찾을 필요가 없습니다. 이 메뉴는 **호스트에서**
-Codex를 실행합니다. 서버 컨테이너의 로그인용 CLI는 아래의
+로그인과 연결 진단이 끝나면 **10번 `Codex 실행`**으로 바로 작업을 시작합니다. 로그인과 실행은
+`CAVEMAN_CODEX_PATH`에 지정한 실행 파일, 선택된 Node와 같은 디렉터리의 `codex`, 저장소에 준비된
+Codex CLI 순서로 선택합니다. 전역 CLI가 없어도 저장소의 CLI로 실행할 수 있습니다.
+`CAVEMAN_CODEX_PATH`는 실행 가능한 파일의 절대 경로여야 하며, 잘못 지정하면 `INVALID_CODEX_PATH`로
+중단합니다. 예: `CAVEMAN_CODEX_PATH=/usr/local/bin/codex ./manage`.
+이 메뉴는 **호스트에서** Codex를 실행합니다. 서버 컨테이너의 로그인용 CLI는 아래의
 [`./stack codex`](#컨테이너의-codex-cli)로 사용할 수 있습니다.
 
 설치 후에도 `./manage`에서 로그인, 연결 진단, 압축 ON/OFF, 모델 목록 동기화, 업데이트와 재시작을

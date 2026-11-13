@@ -59,12 +59,16 @@ class StateTests(unittest.TestCase):
                 self.assertEqual((failed[0]/'auth.json').read_text(),'candidate-migrated')
 
     def test_server_auth_mode_is_explicit_and_invalid_modes_do_not_launch(self):
-        self.assertEqual(m.runtime_env({'CLIENT_AUTH_MODE':'server'}),['--env','CLIENT_AUTH_MODE=server'])
-        self.assertEqual(m.runtime_env({'CLIENT_AUTH_MODE':'forward'}),['--env','CLIENT_AUTH_MODE=forward'])
-        self.assertEqual(m.runtime_env({}),[])
+        self.assertEqual(m.runtime_env({'CLIENT_AUTH_MODE':'server'}),['--env','CLIENT_AUTH_MODE=server']+m.telemetry_env())
+        self.assertEqual(m.runtime_env({'CLIENT_AUTH_MODE':'forward'}),['--env','CLIENT_AUTH_MODE=forward']+m.telemetry_env())
+        self.assertEqual(m.runtime_env({}),m.telemetry_env())
         for mode in ('','false','disabled','SERVER'):
             with self.subTest(mode=mode),self.assertRaisesRegex(RuntimeError,'CLIENT_AUTH_MODE'):
                 m.runtime_env({'CLIENT_AUTH_MODE':mode})
+
+    def test_telemetry_is_disabled_even_when_local_environment_attempts_to_enable_it(self):
+        self.assertEqual(m.runtime_env({'OCX_TELEMETRY':'1','DO_NOT_TRACK':'0','CAVEMAN_TELEMETRY':'1'}),
+                         ['--env','OCX_TELEMETRY=0','--env','DO_NOT_TRACK=1','--env','CAVEMAN_TELEMETRY=0'])
 
     def test_container_codex_preserves_login_stdin_and_exit_status(self):
         for tty in (False,True):
@@ -135,9 +139,11 @@ class StateTests(unittest.TestCase):
 
     def test_published_ports_keep_internal_listeners_private(self):
         cases=[
-            ({'ADMIN_PORT':'20100'},True,['192.0.2.10:18787:8080','192.0.2.10:20100:10100']),
-            ({'ADMIN_PORT':'20100','ADMIN_BIND_ADDRESS':'127.0.0.1'},True,['192.0.2.10:18787:8080','127.0.0.1:20100:10100']),
-            ({'ADMIN_PORT':''},True,['192.0.2.10:18787:8080']),
+            ({'ADMIN_PORT':'20100'},True,['192.0.2.10:18787:8080','192.0.2.10:20100:10100','127.0.0.1:1455:1456']),
+            ({'ADMIN_PORT':'20100','ADMIN_BIND_ADDRESS':'127.0.0.1'},True,['192.0.2.10:18787:8080','127.0.0.1:20100:10100','127.0.0.1:1455:1456']),
+            ({'ADMIN_PORT':''},True,['192.0.2.10:18787:8080','127.0.0.1:1455:1456']),
+            ({'CODEX_OAUTH_PORT':'2455'},True,['192.0.2.10:18787:8080','127.0.0.1:2455:1456']),
+            ({'CODEX_OAUTH_PORT':''},True,['192.0.2.10:18787:8080']),
             ({'ADMIN_PORT':'20100'},False,[]),
         ]
         for extra,publish,expected in cases:
@@ -148,6 +154,36 @@ class StateTests(unittest.TestCase):
                 args=pod.call_args.args
                 ports=[args[i+1] for i,x in enumerate(args) if x=='--publish']
                 self.assertEqual(ports,expected)
+
+    def test_oauth_callback_port_validation_prevents_arbitrary_publish_values(self):
+        for value in ('0','65536','-1','127.0.0.1:1455','1455:1456','abc'):
+            with self.subTest(value=value),self.assertRaisesRegex(RuntimeError,'CODEX_OAUTH_PORT'):
+                m.oauth_port({'CODEX_OAUTH_PORT':value})
+
+    def test_browser_login_requires_loopback_mapping_and_uses_temporary_relay(self):
+        with patch.object(m,'pod',side_effect=[SimpleNamespace(returncode=0,stdout='127.0.0.1:1455\n'),SimpleNamespace(returncode=9)]) as pod:
+            self.assertEqual(m.container_codex({'STACK_NAME':'fixture'},['login']),9)
+        self.assertEqual(pod.call_args_list[0].args,('port','fixture','1456/tcp'))
+        command=pod.call_args.args
+        self.assertIn('exec node /app/scripts/codex-oauth-login.mjs "$@"',' '.join(command))
+        self.assertEqual(command[-1],'login')
+        for mapping in ('','0.0.0.0:1455\n','127.0.0.1:2455\n'):
+            with self.subTest(mapping=mapping),patch.object(m,'pod',return_value=SimpleNamespace(returncode=0,stdout=mapping)) as pod:
+                with self.assertRaisesRegex(RuntimeError,'not published'):
+                    m.container_codex({'STACK_NAME':'fixture'},['login'])
+                self.assertEqual(pod.call_count,1)
+        with patch.object(m,'pod') as pod:
+            with self.assertRaisesRegex(RuntimeError,'disabled'):
+                m.container_codex({'STACK_NAME':'fixture','CODEX_OAUTH_PORT':''},['login'])
+            pod.assert_not_called()
+
+    def test_device_login_status_and_help_remain_unmodified_without_relay(self):
+        for args in (['login','--device-auth'],['login','status'],['login','--help']):
+            with self.subTest(args=args),patch.object(m,'pod',return_value=SimpleNamespace(returncode=0)) as pod:
+                self.assertEqual(m.container_codex({'STACK_NAME':'fixture','CODEX_OAUTH_PORT':''},args),0)
+                pod.assert_called_once()
+                self.assertEqual(pod.call_args.args[-len(args):],tuple(args))
+                self.assertIn('exec /app/node_modules/.bin/codex "$@"',' '.join(pod.call_args.args))
 
     def test_backup_skips_ipc_and_keeps_data_and_symlinks(self):
         with tempfile.TemporaryDirectory() as tmp:

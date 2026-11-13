@@ -21,6 +21,8 @@ ENV OPENCODEX_HOME=/state/opencodex CODEX_HOME=/state/codex CAVEMAN_HOME=/state/
 ENV CAVEMAN_CCR_DB=/state/caveman/ccr.db CAVEMAN_CONFIG=/app/config/chain.yaml
 ENV CAVEMAN_LISTEN=127.0.0.1:8787 CAVE_SSRF_ALLOWLIST=127.0.0.1
 ENV CAVEMAN_RECOVERY=mcp CAVEMAN_TELEMETRY=0 CAVEMAN_OFFLINE=1
-EXPOSE 8080
+# OpenCodex 2.100.x: the process environment overrides stored telemetry consent.
+ENV OCX_TELEMETRY=0 DO_NOT_TRACK=1
+EXPOSE 8080 1456
 HEALTHCHECK --interval=15s --timeout=5s --start-period=45s CMD node /app/scripts/health.mjs
 CMD ["node", "/app/src/supervisor.mjs"]

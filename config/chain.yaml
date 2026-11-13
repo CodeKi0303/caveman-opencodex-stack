@@ -11,8 +11,12 @@ compat:
       - chatgpt-account-id
       - openai-beta
       - originator
+      - session_id
       - session-id
       - thread-id
+      - x-client-request-id
+      - version
+      - x-codex-app-version
       - x-codex-beta-features
       - x-codex-installation-id
       - x-codex-parent-thread-id
@@ -23,3 +27,5 @@ compat:
       - x-openai-subagent
       - x-responsesapi-include-timing-metrics
       - x-openai-internal-codex-responses-lite
+    # OpenCodex derives routing hints from the final model/service tier and
+    # isolates pool installation IDs itself. Do not synthesize either here.

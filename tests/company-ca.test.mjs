@@ -96,7 +96,11 @@ test('company CA does not hide system bundle or company certificate read errors'
   assert.throws(() => companyCaEnvironment(paths), {code: 'EISDIR'});
   fs.rmSync(paths.systemBundle, {recursive: true});
   fs.unlinkSync(path.join(paths.certsDir, 'company.crt'));
-  fs.symlinkSync(path.join(paths.dir, 'missing.crt'), path.join(paths.certsDir, 'company.crt'));
+  try { fs.symlinkSync(path.join(paths.dir, 'missing.crt'), path.join(paths.certsDir, 'company.crt')); }
+  catch(error) {
+    if(process.platform==='win32'&&error.code==='EPERM')return t.skip('Windows does not grant symbolic-link creation; dangling-link case is covered on Linux.');
+    throw error;
+  }
   assert.throws(() => companyCaEnvironment(paths), {code: 'ENOENT'});
   assert.equal(fs.existsSync(paths.bundlePath), false);
 });

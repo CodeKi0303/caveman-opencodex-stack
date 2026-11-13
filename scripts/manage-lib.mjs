@@ -113,7 +113,7 @@ export async function dependencyPlan(missing,{run=capture,exists=fs.existsSync}=
   throw Error('PACKAGE_MANAGER_UNSUPPORTED');
 }
 
-export function createManager({codexHome,scope,repo=repository,nodePath=process.execPath,uid=process.getuid?.()??1000,
+export function createManager({codexHome,codexPath,scope,repo=repository,nodePath=process.execPath,uid=process.getuid?.()??1000,
   env=process.env,platform=process.platform,run=capture,visible=interactive,client=runClient,fetchFn=fetch,remote=remoteCommand,portAvailable=availablePort}={}) {
   const home=path.resolve(codexHome||env.CODEX_HOME||path.join(os.homedir(),'.codex'));
   const directory=path.join(home,'caveman-stack'),configPath=path.join(directory,'native-bridge.json');
@@ -130,6 +130,26 @@ export function createManager({codexHome,scope,repo=repository,nodePath=process.
   }
   const command=(name,args=[],options={})=>run(name,args,{cwd:repo,...options});
   const show=(name,args=[],options={})=>visible(name,args,{cwd:repo,...options});
+  function launchCodex(args=[],cwd=repo) {
+    const executable=file=>{try{if(!fs.statSync(file).isFile())return false;fs.accessSync(file,fs.constants.X_OK);return true;}catch{return false;}};
+    const override=codexPath===undefined?env.CAVEMAN_CODEX_PATH:codexPath;
+    const nodeDirectory=path.dirname(path.resolve(nodePath));
+    let selected;
+    if(override!==undefined) {
+      if(typeof override!=='string'||!path.isAbsolute(override)||!executable(override))throw Error('INVALID_CODEX_PATH');
+      selected=override;
+    } else {
+      const adjacent=path.join(nodeDirectory,'codex');
+      if(executable(adjacent))selected=adjacent;
+    }
+    const childEnv={...env,CODEX_HOME:home};
+    if(selected) {
+      // Global npm launchers use /usr/bin/env node. Keep them on the selected runtime.
+      childEnv.PATH=[nodeDirectory,env.PATH].filter(Boolean).join(path.delimiter);
+      return show(selected,args,{cwd,env:childEnv});
+    }
+    return show(nodePath,[path.join(repo,'node_modules/@openai/codex/bin/codex.js'),...args],{cwd,env:childEnv});
+  }
   function localManagement(c) {if(c.management?.mode!=='local'||fs.realpathSync(c.management.repo)!==fs.realpathSync(repo))throw Error('LOCAL_SERVER_REQUIRED');}
   async function gateway(c,key=keyOf(c)) {
     const headers={'x-caveman-gateway-key':key};
@@ -258,8 +278,8 @@ export function createManager({codexHome,scope,repo=repository,nodePath=process.
     sync:()=>locked(()=>client(clientArgs('sync',required()))),
     doctor:()=>{const c=required();return client([...clientArgs('doctor',c),'--provider','openai','--bridge-url',`http://127.0.0.1:${c.port}/v1`]);},
     versions:()=>{const c=required();if(!c.management)throw Error('SERVER_MANAGEMENT_REQUIRED');return remote(c,'check');},
-    login:()=>show(nodePath,[path.join(repo,'node_modules/@openai/codex/bin/codex.js'),'login','--device-auth'],{env:{...env,CODEX_HOME:home}}),
-    startCodex:(workdir=process.cwd())=>{const cwd=path.resolve(workdir);if(!fs.statSync(cwd).isDirectory())throw Error('CONFIG_UNREADABLE');return show(nodePath,[path.join(repo,'node_modules/@openai/codex/bin/codex.js')],{cwd,env:{...env,CODEX_HOME:home}});},
+    login:()=>launchCodex(['login','--device-auth']),
+    startCodex:(workdir=process.cwd())=>{const cwd=path.resolve(workdir);if(!fs.statSync(cwd).isDirectory())throw Error('CONFIG_UNREADABLE');return launchCodex([],cwd);},
     restartServer:()=>locked(async()=>{localManagement(required());await show('python3',[script('install-stack-service.py'),'restart','--'+serviceScope()]);return {ok:true};}),
     installDependencies:async missing=>{const p=await dependencyPlan(missing,{run:command});await show(uid===0?p.command:'sudo',uid===0?p.args:[p.command,...p.args]);return requirements({server:missing.includes('podman')||missing.includes('slirp4netns'),scope:serviceScope(),run:command});},
     authorizeLinger:()=>uid===0?Promise.resolve():show('sudo',['-v']),
@@ -267,5 +287,5 @@ export function createManager({codexHome,scope,repo=repository,nodePath=process.
     isWsl:Boolean(env.WSL_DISTRO_NAME),uid,platform
   };
 }
-const codes=new Set(('USAGE INVALID_URL INVALID_GATEWAY_KEY INVALID_PORT NO_FREE_PORT CONFIG_INVALID CONFIG_UNREADABLE KEY_REQUIRED KEY_FILE_UNREADABLE INVALID_BIND INVALID_COMPRESSION INVALID_SERVER_RESPONSE GATEWAY_UNAVAILABLE GATEWAY_KEY_REJECTED SERVER_UPGRADE_REQUIRED SCOPE_MISMATCH LOCAL_SERVER_REQUIRED SERVER_MANAGEMENT_REQUIRED NOT_CONFIGURED MANAGER_BUSY CONCURRENT_EDIT PORT_CHANGE_REQUIRES_REINSTALL BRIDGE_INSTALL_FAILED CLIENT_INSTALL_FAILED PANEL_INSTALL_FAILED COMMAND_FAILED CANCELLED DEPENDENCIES_MISSING SYSTEMD_UNAVAILABLE UNSUPPORTED_DEPENDENCY PODMAN_REPOSITORY_TOO_OLD PACKAGE_MANAGER_UNSUPPORTED PORT_IN_USE SERVER_OWNERSHIP_FAILED TTY_REQUIRED INVALID_SELECTION').split(' '));
+const codes=new Set(('USAGE INVALID_URL INVALID_GATEWAY_KEY INVALID_PORT NO_FREE_PORT CONFIG_INVALID CONFIG_UNREADABLE KEY_REQUIRED KEY_FILE_UNREADABLE INVALID_BIND INVALID_COMPRESSION INVALID_CODEX_PATH INVALID_SERVER_RESPONSE GATEWAY_UNAVAILABLE GATEWAY_KEY_REJECTED SERVER_UPGRADE_REQUIRED SCOPE_MISMATCH LOCAL_SERVER_REQUIRED SERVER_MANAGEMENT_REQUIRED NOT_CONFIGURED MANAGER_BUSY CONCURRENT_EDIT PORT_CHANGE_REQUIRES_REINSTALL BRIDGE_INSTALL_FAILED CLIENT_INSTALL_FAILED PANEL_INSTALL_FAILED COMMAND_FAILED CANCELLED DEPENDENCIES_MISSING SYSTEMD_UNAVAILABLE UNSUPPORTED_DEPENDENCY PODMAN_REPOSITORY_TOO_OLD PACKAGE_MANAGER_UNSUPPORTED PORT_IN_USE SERVER_OWNERSHIP_FAILED TTY_REQUIRED INVALID_SELECTION').split(' '));
 export function safeError(e){const code=e?.code??e?.message;return codes.has(code)?code:'OPERATION_FAILED';}

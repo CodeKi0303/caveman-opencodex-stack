@@ -4,6 +4,7 @@ import http from 'node:http';
 import net from 'node:net';
 import {once} from 'node:events';
 import {createNativeBridge} from '../src/native-bridge.mjs';
+import {createGateway} from '../src/gateway.mjs';
 
 const key = 'bridge-fixture-'.repeat(4);
 test('bridge reloads destination policy per request and overrides caller compression preference',async t=>{
@@ -80,7 +81,9 @@ test('native bridge injects fixed key and preserves OAuth/account attribution',a
 test('server authentication removes client credentials for every supported route without changing payloads',async t => {
   const f = await fixture(t,{clientAuthMode:'server'});
   const credentials = {authorization:'Bearer oauth-fixture','chatgpt-account-id':'account-fixture',
-    'x-api-key':'api-key-fixture','openai-organization':'organization-fixture',
+    'x-api-key':'api-key-fixture','api-key':'legacy-key-fixture',
+    'x-oai-attestation':'caller-attestation','x-openai-agent-assertion':'caller-assertion',
+    'openai-organization':'organization-fixture',
     'openai-project':'project-fixture',cookie:'cookie-fixture',cookie2:'cookie2-fixture'};
   const headers = {...credentials,'x-caveman-gateway-key':'caller-key','content-type':'application/json',
     'x-codex-turn-metadata':'{"subagent_kind":"thread_spawn"}','x-openai-subagent':'collab_spawn'};
@@ -151,6 +154,52 @@ test('headers received from upstream cannot disclose credentials or enable CORS'
     'set-cookie','access-control-allow-origin','x-private-hop']) assert.equal(result.headers[name],undefined,name);
   assert.equal(result.headers['x-request-id'],'request-fixture');
   assert.equal(result.body,'{}');
+});
+
+test('bridge and gateway preserve OpenCodex accounting metadata while removing caller authentication',async t=>{
+  const turnMetadata=JSON.stringify({installation_id:'fixture-installation',turn_source:'thread_spawn'});
+  const body=JSON.stringify({model:'fixture',input:'Synthetic request.',stream:true,client_metadata:{
+    'x-codex-installation-id':'fixture-installation','x-codex-turn-metadata':turnMetadata,
+    custom_field:{preserve:true},
+  }});
+  const responseMetadata={'x-reasoning-included':'true','x-codex-turn-state':'ocx-fixture-next-turn',
+    'x-codex-primary-used-percent':'12','x-codex-primary-window-minutes':'300',
+    'x-codex-primary-reset-at':'1800000000','retry-after':'2'};
+  const sse='data: '+JSON.stringify({type:'response.completed',response:{usage:{input_tokens:250000,output_tokens:500,total_tokens:250500}}})+'\n\n';
+  let received;
+  const backend=http.createServer((req,res)=>{
+    const chunks=[];req.on('data',chunk=>chunks.push(chunk));req.on('end',()=>{
+      received={url:req.url,headers:req.headers,body:Buffer.concat(chunks).toString()};
+      res.writeHead(200,{'content-type':'text/event-stream',...responseMetadata,
+        authorization:'Bearer response-must-not-escape','x-oai-attestation':'response-must-not-escape'});
+      res.end(sse);
+    });
+  });
+  const gateway=createGateway({key,clientAuthMode:'server',request:(options,callback)=>{
+    assert.equal(options.port,10101);
+    return http.request({...options,port:backend.address().port},callback);
+  }});
+  let bridge;
+  t.after(()=>{for(const server of [bridge,gateway,backend]){server?.closeAllConnections();server?.close();}});
+  backend.listen(0,'127.0.0.1');await once(backend,'listening');
+  gateway.listen(0,'127.0.0.1');await once(gateway,'listening');
+  const upstreamUrl=`http://127.0.0.1:${gateway.address().port}/v1`;
+  bridge=createNativeBridge({upstreamUrl,key,getSettings:()=>({upstreamUrl,key,clientAuthMode:'server',compression:false})});
+  bridge.listen(0,'127.0.0.1');await once(bridge,'listening');
+  const result=await call(`http://127.0.0.1:${bridge.address().port}/v1/responses`,{method:'POST',body,headers:{
+    'content-type':'application/json','x-caveman-gateway-key':'caller-key-must-be-replaced',
+    authorization:'Bearer caller-fixture','chatgpt-account-id':'caller-account',
+    'x-oai-attestation':'caller-attestation','x-openai-agent-assertion':'caller-assertion',
+    'x-codex-turn-metadata':turnMetadata,'x-codex-turn-state':'ocx-fixture-prior-turn',
+  }});
+  assert.equal(result.status,200);assert.equal(result.body,sse);
+  for(const [name,value] of Object.entries(responseMetadata))assert.equal(result.headers[name],value,name);
+  assert.equal(received.url,'/v1/responses');assert.equal(received.body,body);
+  assert.equal(received.headers['x-codex-turn-metadata'],turnMetadata);
+  assert.equal(received.headers['x-codex-turn-state'],'ocx-fixture-prior-turn');
+  for(const name of ['authorization','chatgpt-account-id','x-oai-attestation','x-openai-agent-assertion','x-caveman-gateway-key']){
+    assert.equal(received.headers[name],undefined,name+' request');assert.equal(result.headers[name],undefined,name+' response');
+  }
 });
 
 test('browser cross-origin, rebound Host, unsupported routes and methods are rejected',async t => {
@@ -230,6 +279,63 @@ test('declared and streaming request bodies are bounded',async t => {
   assert(f.seen.every(row => Buffer.byteLength(row.body) <= 16));
 });
 
+test('bridge retains its default limit and permits an explicit 512 MiB limit',async t => {
+  for (const maxRequestBytes of [undefined,536870912]) {
+    const bridge=createNativeBridge({upstreamUrl:'http://127.0.0.1:1/v1',key,maxRequestBytes});
+    t.after(()=>{bridge.closeAllConnections();bridge.close();});
+    bridge.listen(0,'127.0.0.1');await once(bridge,'listening');
+    const url=`http://127.0.0.1:${bridge.address().port}`;
+    const limit=maxRequestBytes??268435456;
+    assert.equal(JSON.parse((await call(url+'/healthz')).body).max_request_bytes,limit);
+    const refused=await call(url+'/v1/responses',{method:'POST',headers:{'content-length':String(limit+1)}});
+    assert.equal(refused.status,413);
+    assert.match(refused.body,/Request body exceeds bridge limit/);
+  }
+});
+
+test('raised bridge and gateway limits stream a body above 256 MiB to a local mock', {timeout:30000}, async t => {
+  const size=268435457;
+  let received=0;
+  const backend=http.createServer((req,res)=>{
+    req.on('data',chunk=>{received+=chunk.length;});
+    req.on('end',()=>res.writeHead(200,{'content-type':'application/json'}).end(JSON.stringify({received})));
+  });
+  t.after(()=>{backend.closeAllConnections();backend.close();});
+  backend.listen(0,'127.0.0.1');await once(backend,'listening');
+  const gateway=createGateway({key,maxRequestBytes:536870912,request:(options,callback)=>
+    http.request({...options,hostname:'127.0.0.1',port:backend.address().port},callback)});
+  t.after(()=>{gateway.closeAllConnections();gateway.close();});
+  gateway.listen(0,'127.0.0.1');await once(gateway,'listening');
+  const bridge=createNativeBridge({key,maxRequestBytes:536870912,
+    upstreamUrl:`http://127.0.0.1:${gateway.address().port}/v1`});
+  t.after(()=>{bridge.closeAllConnections();bridge.close();});
+  bridge.listen(0,'127.0.0.1');await once(bridge,'listening');
+  const req=http.request(`http://127.0.0.1:${bridge.address().port}/v1/responses`,{method:'POST'});
+  const response=new Promise((resolve,reject)=>{
+    req.on('error',reject);
+    req.on('response',res=>{
+      let body='';
+      res.on('data',chunk=>{body+=chunk;});
+      res.on('error',reject);
+      res.on('end',()=>resolve({status:res.statusCode,body}));
+    });
+  });
+  // Reuse a small buffer and honor backpressure; no full-size body is retained.
+  const chunk=Buffer.alloc(64*1024,120);
+  const upload=(async()=>{
+    for(let remaining=size;remaining>0;){
+      const length=Math.min(chunk.length,remaining);
+      if(!req.write(chunk.subarray(0,length)))await once(req,'drain');
+      remaining-=length;
+    }
+    req.end();
+  })();
+  const [result]=await Promise.all([response,upload]);
+  assert.equal(result.status,200);
+  assert.equal(JSON.parse(result.body).received,size);
+  assert.equal(received,size);
+});
+
 test('client SSE disconnect closes the upstream response',async t => {
   let upstreamClosed;
   const closed = new Promise(resolve => upstreamClosed = resolve);
@@ -279,7 +385,7 @@ test('startup rejects destinations containing secrets or unfixed paths',() => {
   for (const upstreamUrl of ['https://user:pass@example.test/v1','https://example.test/v1?token=fixture',
     'https://example.test/v1#fixture','https://example.test/elsewhere','file:///v1'])
     assert.throws(() => createNativeBridge({upstreamUrl,key}));
-  for (const maxRequestBytes of [0,-1,268435457,1.5])
+  for (const maxRequestBytes of [0,-1,536870913,1.5,NaN,Infinity])
     assert.throws(() => createNativeBridge({upstreamUrl:'http://127.0.0.1:18787/v1',key,maxRequestBytes}));
   for (const clientAuthMode of ['typo','',null,false,{}])
     assert.throws(() => createNativeBridge({upstreamUrl:'http://127.0.0.1:18787/v1',key,clientAuthMode}));

@@ -10,11 +10,13 @@ import {setTimeout as delay} from 'node:timers/promises';
 test('real Caveman preserves account and Codex routing headers',
   {skip: !process.env.CAVEMAN_PROXY_BIN, timeout: 30000}, async t => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'caveman-headers-'));
-    let child;
+    let child,diagnostic='';
     const upstream = http.createServer(async (req, res) => {
-      for await (const _chunk of req) { /* Consume the synthetic request. */ }
-      res.writeHead(200, {'content-type': 'application/json'});
-      res.end(JSON.stringify({headers: req.headers, url: req.url}));
+      const chunks=[];for await (const chunk of req) chunks.push(chunk);
+      res.writeHead(200, {'content-type': 'application/json','x-reasoning-included':'true',
+        'x-codex-turn-state':'ocx-fixture-handle','x-codex-primary-used-percent':'12',
+        'x-codex-primary-window-minutes':'300','retry-after':'2'});
+      res.end(JSON.stringify({headers: req.headers, url: req.url, body:JSON.parse(Buffer.concat(chunks))}));
     });
     await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
     t.after(async () => {
@@ -38,15 +40,17 @@ test('real Caveman preserves account and Codex routing headers',
       .replace('http://127.0.0.1:10101/v1', 'http://127.0.0.1:' + upstream.address().port + '/v1');
     const configPath = path.join(dir, 'chain.yaml');
     await fs.writeFile(configPath, config);
-    child = spawn(process.env.CAVEMAN_PROXY_BIN, [], {stdio: 'ignore', env: {
+    child = spawn(process.env.CAVEMAN_PROXY_BIN, [], {stdio: ['ignore','pipe','pipe'], env: {
       ...process.env, CAVEMAN_HOME: dir, CAVEMAN_CONFIG: configPath,
       CAVEMAN_CCR_DB: path.join(dir, 'ccr.db'), CAVEMAN_MODE: 'record',
       CAVEMAN_LISTEN: '127.0.0.1:' + port, CAVE_SSRF_ALLOWLIST: '127.0.0.1',
       CAVEMAN_OFFLINE: '1', CAVEMAN_TELEMETRY: '0'
     }});
+    child.stderr.on('data',chunk=>{diagnostic=(diagnostic+chunk).slice(-3000);});
+    child.stdout.on('data',chunk=>{diagnostic=(diagnostic+chunk).slice(-3000);});
     let ready = false;
     for (let i = 0; i < 80; i++) {
-      if (child.exitCode !== null) throw Error('Caveman exited before becoming ready');
+      if (child.exitCode !== null) throw Error('Caveman exited before becoming ready: '+diagnostic);
       try {
         const r = await fetch('http://127.0.0.1:' + port + '/health/live', {signal: AbortSignal.timeout(500)});
         await r.arrayBuffer(); ready = r.ok;
@@ -58,14 +62,24 @@ test('real Caveman preserves account and Codex routing headers',
     const headers = {'content-type': 'application/json', authorization: 'Bearer synthetic-fixture',
       'chatgpt-account-id': 'fixture-account', 'x-openai-subagent': 'thread_spawn',
       'x-codex-turn-metadata': '{"turn_source":"thread_spawn"}',
-      'session-id': 'fixture-session', 'thread-id': 'fixture-thread',
+      'session-id': 'fixture-session', 'session_id':'fixture-native-session','thread-id': 'fixture-thread',
+      'x-client-request-id':'fixture-request','version':'0.166.0',
+      'x-codex-app-version':'fixture-app','x-codex-installation-id':'fixture-installation',
+      'x-codex-turn-state':'ocx-fixture-prior','x-openai-internal-codex-responses-lite':'true',
       'x-codex-parent-thread-id': 'fixture-parent'};
+    const body={model:'fixture',input:'Synthetic header test.',stream:false,
+      client_metadata:{'x-codex-turn-metadata':headers['x-codex-turn-metadata'],
+        'x-codex-installation-id':'fixture-installation','custom_field':'preserve-me'}};
     const response = await fetch('http://127.0.0.1:' + port + '/compat/opencodex/v1/responses', {
-      method: 'POST', headers, body: JSON.stringify({model: 'fixture', input: 'Synthetic header test.', stream: false}),
+      method: 'POST', headers, body: JSON.stringify(body),
       signal: AbortSignal.timeout(10000)
     });
     assert.equal(response.status, 200);
+    for(const [name,value] of Object.entries({'x-reasoning-included':'true','x-codex-turn-state':'ocx-fixture-handle',
+      'x-codex-primary-used-percent':'12','x-codex-primary-window-minutes':'300','retry-after':'2'}))
+      assert.equal(response.headers.get(name),value,name);
     const received = await response.json();
     for (const [name, value] of Object.entries(headers)) assert.equal(received.headers[name], value, name);
     assert.equal(received.url, '/v1/responses');
+    assert.deepEqual(received.body.client_metadata,body.client_metadata);
   });

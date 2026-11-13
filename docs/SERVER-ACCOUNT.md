@@ -23,6 +23,10 @@ OpenCodex가 저장된 서버 계정으로 인증하도록 구성한 방식입�
 ./stack codex login status
 ```
 
+디바이스 인증을 사용할 수 없으면 `./stack codex login`으로 브라우저 OAuth 폴백을 실행합니다.
+호스트 루프백 `1455` → 컨테이너 임시 릴레이 `1456` → Codex 루프백 `1455`로 연결하며,
+원격 브라우저의 SSH 터널과 기존 컨테이너 갱신 방법은 [OAuth 로그인](OAUTH-LOGIN.md)을 참고하세요.
+
 인증은 컨테이너 `/state/codex/auth.json`, 호스트 `data/state/codex/auth.json`에 저장됩니다.
 OpenCodex 웹의 풀 계정 추가와는 별개입니다. 2.88.0의 메인 계정 재인증 버튼은 기존 메인 로그인과
 같은 계정으로 갱신하는 기능이므로, 인증이 없으면 `native_main_unavailable`을 반환합니다.
@@ -53,7 +57,7 @@ OpenCodex의 계정 선택 모드는 `pool`을 유지합니다.
 이미지도 갱신해야 하며, `./stack update`는 저장소의 고정 패키지 버전을 사용하므로 현재 실행 버전과
 맞는 manifest를 준비하세요. 변경 전에 백업하고 작업 중인 요청이 없는 시점에 전환합니다.
 
-`server`에서는 Authorization, ChatGPT 계정 ID, API 키, 조직·프로젝트, 쿠키 헤더를
+`server`에서는 Authorization, ChatGPT 계정 ID, API 키, 조직·프로젝트, 쿠키와 클라이언트의 attestation·agent assertion 헤더를
 Caveman과 이미지·검색·compact 우회 경로 모두에서 제거합니다. OpenCodex가 모델 전송 직전에
 서버 인증을 선택합니다. `forward`는 기존 전달 방식이며 누락 시 기본값입니다.
 알 수 없는 값은 시작 오류로 처리합니다. 인증된 `/v1/stack-info`의 `clientAuthMode`로 확인합니다.

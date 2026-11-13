@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {PassThrough} from 'node:stream';
-import {createManager,parseArgs,normalizeUrl,validateKey,choosePort,configureNewEnvironment,requirements,dependencyPlan,safeError,supportsPodman} from '../scripts/manage-lib.mjs';
+import {createManager,capture,parseArgs,normalizeUrl,validateKey,choosePort,configureNewEnvironment,requirements,dependencyPlan,safeError,supportsPodman} from '../scripts/manage-lib.mjs';
 import {setup,menu,terminalIO} from '../scripts/manage.mjs';
 
 function fixture(t,{existing=false,...injections}={}) {
@@ -183,14 +183,65 @@ test('terminal secret input disables echo before showing prompt and restores ter
   const pending=terminalIO({input,output}).secret('Key');input.write('sensitive-key\r');assert.equal(await pending,'sensitive-key');assert(!display.includes('sensitive-key'));assert.equal(input.isRaw,false);
 });
 
-test('Codex login and launch use the selected native runtime, home and working directory',async t=>{
-  const calls=[];
-  const f=fixture(t,{visible:async(command,args,options)=>calls.push({command,args,options})});
+function codexFixture(t,{env={},...options}={}) {
+  const f=fixture(t),calls=[],nodePath=path.join(f.repo,'runtime/bin/node');
+  fs.mkdirSync(path.dirname(nodePath),{recursive:true});
+  const manager=createManager({repo:f.repo,codexHome:f.home,nodePath,env,
+    visible:async(command,args,options)=>calls.push({command,args,options}),...options});
+  return {...f,calls,nodePath,manager};
+}
+test('Codex falls back to the bundled CLI with the selected native runtime, home and working directory',async t=>{
+  const env={},f=codexFixture(t,{env}),{calls}=f,injected=path.join(f.repo,'node_modules/.bin');
+  fs.mkdirSync(injected,{recursive:true});fs.writeFileSync(path.join(injected,'codex'),'#!/bin/sh\nexit 0\n',{mode:0o755});
+  env.PATH=injected;
   await f.manager.login();await f.manager.startCodex(f.repo);
-  assert.equal(calls[0].command,'/usr/bin/node');
-  assert.deepEqual(calls[0].args.slice(1),['login','--device-auth']);
-  assert.equal(calls[1].args.length,1);
+  const bundled=path.join(f.repo,'node_modules/@openai/codex/bin/codex.js');
+  assert.equal(calls[0].command,f.nodePath);
+  assert.deepEqual(calls[0].args,[bundled,'login','--device-auth']);
+  assert.deepEqual(calls[1].args,[bundled]);
   assert.equal(calls[1].options.cwd,f.repo);
   for(const call of calls)assert.equal(call.options.env.CODEX_HOME,f.home);
   assert.equal(fs.readFileSync(f.authFile,'utf8'),'existing-login-must-not-change');
+});
+test('Codex uses the CLI beside the selected Node before npm-injected PATH entries',async t=>{
+  const env={PATH:'/npm-injected/node_modules/.bin:/usr/bin',KEEP_SETTING:'preserved'};
+  const f=codexFixture(t,{env}),adjacent=path.join(path.dirname(f.nodePath),'codex');
+  fs.writeFileSync(adjacent,'#!/bin/sh\nexit 0\n',{mode:0o755});
+  await f.manager.login();await f.manager.startCodex(f.home);
+  assert.deepEqual(f.calls.map(call=>call.command),[adjacent,adjacent]);
+  assert.deepEqual(f.calls.map(call=>call.args),[['login','--device-auth'],[]]);
+  assert.equal(f.calls[0].options.cwd,f.repo);assert.equal(f.calls[1].options.cwd,f.home);
+  for(const call of f.calls)assert.deepEqual(call.options.env,{...env,CODEX_HOME:f.home,PATH:path.dirname(f.nodePath)+path.delimiter+env.PATH});
+  assert.equal(env.PATH,'/npm-injected/node_modules/.bin:/usr/bin');
+});
+test('an explicit Codex executable takes precedence over the CLI beside Node',async t=>{
+  const env={},f=codexFixture(t,{env}),selected=path.join(f.repo,'custom-codex');
+  for(const file of [selected,path.join(path.dirname(f.nodePath),'codex')])fs.writeFileSync(file,'#!/bin/sh\nexit 0\n',{mode:0o755});
+  env.CAVEMAN_CODEX_PATH=selected;
+  await f.manager.login();await f.manager.startCodex(f.home);
+  assert.deepEqual(f.calls.map(call=>call.command),[selected,selected]);
+  assert.deepEqual(f.calls.map(call=>call.args),[['login','--device-auth'],[]]);
+  for(const call of f.calls){assert.equal(call.options.env.CODEX_HOME,f.home);assert.equal(call.options.env.PATH,path.dirname(f.nodePath));}
+});
+test('invalid explicit Codex paths fail clearly without silently launching another CLI',t=>{
+  const env={},f=codexFixture(t,{env}),nonExecutable=path.join(f.repo,'not-executable');
+  fs.writeFileSync(nonExecutable,'not executable',{mode:0o644});
+  fs.writeFileSync(path.join(path.dirname(f.nodePath),'codex'),'#!/bin/sh\nexit 0\n',{mode:0o755});
+  for(const selected of ['', 'relative/codex',path.join(f.repo,'missing'),f.repo,...(process.platform==='win32'?[]:[nonExecutable])]) {
+    env.CAVEMAN_CODEX_PATH=selected;
+    assert.throws(()=>f.manager.login(),/INVALID_CODEX_PATH/);
+    assert.throws(()=>f.manager.startCodex(f.repo),/INVALID_CODEX_PATH/);
+  }
+  assert.equal(f.calls.length,0);assert.equal(safeError(Error('INVALID_CODEX_PATH')),'INVALID_CODEX_PATH');
+});
+test('an external npm-style Codex launcher resolves its Node shebang using the selected runtime', {skip:process.platform==='win32'},async t=>{
+  const env={},f=codexFixture(t,{env,visible:capture}),selected=path.join(f.repo,'external-codex'),otherBin=path.join(f.repo,'other-bin');
+  fs.symlinkSync(process.execPath,f.nodePath);fs.mkdirSync(otherBin);
+  fs.writeFileSync(path.join(otherBin,'node'),'#!/bin/sh\nexit 99\n',{mode:0o755});
+  fs.writeFileSync(selected,'#!/usr/bin/env node\nrequire("node:fs").writeFileSync(process.env.LAUNCH_RESULT,JSON.stringify({cwd:process.cwd(),home:process.env.CODEX_HOME,args:process.argv.slice(2)}));\n',{mode:0o755});
+  env.PATH=otherBin;env.CAVEMAN_CODEX_PATH=selected;env.LAUNCH_RESULT=path.join(f.repo,'launch-result.json');
+  await f.manager.login();
+  assert.deepEqual(JSON.parse(fs.readFileSync(env.LAUNCH_RESULT)),{cwd:f.repo,home:f.home,args:['login','--device-auth']});
+  await f.manager.startCodex(f.home);
+  assert.deepEqual(JSON.parse(fs.readFileSync(env.LAUNCH_RESULT)),{cwd:f.home,home:f.home,args:[]});
 });

@@ -103,6 +103,9 @@ class LatestTests(unittest.TestCase):
         self.assertIn(str(ca)+':/tmp/company-ca.pem:ro,z',args)
         self.assertIn('NODE_EXTRA_CA_CERTS=/tmp/company-ca.pem',args)
         self.assertIn('HTTPS_PROXY',args)
+        self.assertIn('OCX_TELEMETRY=0',args)
+        self.assertIn('DO_NOT_TRACK=1',args)
+        self.assertIn('CAVEMAN_TELEMETRY=0',args)
         self.assertEqual(pod.call_args.kwargs['env']['HTTPS_PROXY'],settings['HTTPS_PROXY'])
 
     def test_resolver_rejects_floating_node_base_without_network_request(self):
