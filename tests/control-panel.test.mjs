@@ -20,7 +20,7 @@ async function fixture(t,{management,platform,remoteClients}={}){
   if(url.endsWith('/healthz')){if(state.bridgeDown)throw Error('private bridge detail');return Response.json({service:'caveman-native-bridge',controlVersion:1});}
   if(state.reject)return new Response('',{status:401});
   assert(opts.headers['x-caveman-gateway-key']);return Response.json({capabilities:{compressionSwitch:true}});
- },client:async args=>{calls.push(args);if(state.clientFails)throw Error('fixture secret must not escape');return {ok:true,catalogChanged:false,warnings:[]};},remote:async(_c,a,args)=>{calls.push({a,args});if(a==='status'){if(state.managementFails)throw Error('private management detail');if(state.statusWait)await state.statusWait;return {ok:true,authentication:{mode:state.authMode??'pool',source:'server',secret:key}};}return {ok:true};}});
+ },client:async args=>{calls.push(args);if(state.clientFails)throw Error('fixture secret must not escape');return state.clientResult??{ok:true,catalogChanged:false,warnings:[]};},remote:async(_c,a,args)=>{calls.push({a,args});if(a==='status'){if(state.managementFails)throw Error('private management detail');if(state.statusWait)await state.statusWait;return {ok:true,authentication:{mode:state.authMode??'pool',source:'server',secret:key}};}if(state.serverFails)throw Error('SERVER_OPERATION_FAILED');return state.serverResult??{ok:true};}});
  server.listen(0,'127.0.0.1');await once(server,'listening');
  t.after(()=>{server.closeAllConnections();server.close();assert(path.dirname(home)===fs.realpathSync(os.tmpdir())||path.dirname(home)===os.tmpdir());fs.rmSync(home,{recursive:true,force:true});});
  const url=`http://127.0.0.1:${server.address().port}`,html=await fetch(url).then(r=>r.text()),token=/name="control-token" content="([a-f0-9]+)"/.exec(html)[1];
@@ -153,7 +153,7 @@ test('updates need a valid fixed component, semantic version and explicit confir
  for(const body of [{component:'shell',version:'1.2.3',confirm:true},{component:'caveman',version:'$(id)',confirm:true},{component:'caveman',version:'1.2.3'}])assert.equal((await f.call('update',body)).status,400);
  for(const component of ['caveman','opencodex','codex']){
   assert.equal((await f.call('update',{component,version:'1.2.3',confirm:true})).status,202);
-  await new Promise(r=>setTimeout(r,20));assert.equal((await f.call('status').then(r=>r.json())).job.status,'succeeded');assert.deepEqual(f.calls.at(-1),{a:'update',args:{component,version:'1.2.3'}});
+  await new Promise(r=>setTimeout(r,20));assert.equal((await f.call('status').then(r=>r.json())).job.status,'succeeded');assert.deepEqual(f.calls.filter(c=>c.a).at(-1),{a:'update',args:{component,version:'1.2.3'}});assert.equal(f.calls.at(-1)[0],'sync');
  }
 });
 
@@ -168,7 +168,7 @@ test('batch updates validate the entire selection and launch one server operatio
  assert.deepEqual(f.calls,[]);
  assert.equal((await f.call('update',{updates,confirm:true})).status,202);
  await new Promise(r=>setTimeout(r,20));
- assert.deepEqual(f.calls,[{a:'update',args:{updates}}]);
+ assert.deepEqual(f.calls.filter(c=>c.a),[{a:'update',args:{updates}}]);assert.equal(f.calls.filter(Array.isArray).length,1);assert.equal(f.calls.at(-1)[0],'sync');
  assert.equal((await f.call('status').then(r=>r.json())).job.status,'succeeded');
 });
 test('Linux direct management is bound to the running repository and cannot be enabled or redirected by the web form',async t=>{
@@ -193,7 +193,7 @@ test('doctor explicitly checks the native OpenAI bridge; all server actions reta
  assert.equal((await f.call('doctor',{})).status,202);await new Promise(r=>setTimeout(r,10));
  assert(f.calls[0].includes('--provider'));assert(f.calls[0].includes('openai'));assert(f.calls[0].includes('--bridge-url'));assert(f.calls[0].includes('http://127.0.0.1:18788/v1'));
  for(const [route,action] of [['check-update','check'],['refresh-server-catalog','catalog']]){
-  assert.equal((await f.call(route,{})).status,202);await new Promise(r=>setTimeout(r,10));assert.deepEqual(f.calls.at(-1),{a:action,args:{}});
+  assert.equal((await f.call(route,{})).status,202);await new Promise(r=>setTimeout(r,10));assert.deepEqual(f.calls.filter(c=>c.a&&c.a!=='status').at(-1),{a:action,args:{}});
  }
 });
 function processFixture(result={ok:true}, {hang=false,error=false}={}){
@@ -229,4 +229,65 @@ test('direct management errors and timeout are sanitized, while legacy SSH keeps
  const panel=await fixture(t),ssh=processFixture();
  await remoteCommand({upstreamUrl:'http://server.test/v1',management:{host:'root@server.test',keyFile:path.join(panel.dir,'key'),repo:'/home/stack'}},'check',{}, {platform:'win32',spawnFn:ssh.spawnFn});
  assert.equal(ssh.calls[0].command,'ssh');assert(ssh.calls[0].args.includes('StrictHostKeyChecking=yes'));assert(ssh.calls[0].args.includes('BatchMode=yes'));assert(!ssh.calls[0].input.includes(panel.key));
+});
+
+test('cache-only repair is reported as changed and a different expected Pod is refused before sync',async t=>{
+ const f=await fixture(t);f.state.clientResult={ok:true,changed:true,catalogChanged:false,cacheChanged:true,cacheRepaired:true,configChanged:false,restartCodex:true,warnings:[]};
+ assert.equal((await f.call('sync',{expectedUpstreamUrl:'http://other.test/v1'})).status,400);assert.deepEqual(f.calls,[]);
+ assert.equal((await f.call('sync',{expectedUpstreamUrl:'http://server.test/v1/'})).status,202);
+ await new Promise(r=>setTimeout(r,10));const status=await f.call('status').then(r=>r.json());
+ assert.equal(status.capabilities.catalogSyncRepair,1);assert.match(status.controlInstance,/^[a-f0-9-]+$/);
+ assert.equal(status.job.result.changed,true);assert.equal(status.job.result.catalogChanged,false);
+ assert.equal(status.job.result.cacheRepaired,true);assert.equal(status.job.result.restartCodex,true);
+});
+
+test('explicit remote sync does not claim the initiating PC was already synchronized',async t=>{
+ const calls=[],f=await fixture(t,{remoteClients:async(targets,ids,action,options)=>{
+  calls.push({targets,ids,action,options});return {ok:true,action,results:[]};
+ }});
+ const saved=await f.call('remote-clients',{target:{host:'user@client.test',configPath:'/home/user/.codex/config.toml'}}).then(r=>r.json());
+ await f.call('remote-client-action',{action:'sync',ids:[saved.remoteClients[0].id]});
+ await new Promise(r=>setTimeout(r,10));
+ assert.equal(calls.length,1);assert.equal(calls[0].action,'sync');
+ assert.deepEqual(calls[0].options,{requireCacheRepair:true});
+ assert.equal(f.calls.filter(Array.isArray).length,0,'explicit remote sync has not synchronized the local PC');
+});
+
+test('unchanged server refresh always repairs local cache and fans out with Pod and capability guards',async t=>{
+ const remoteCalls=[],f=await fixture(t,{remoteClients:async(targets,ids,action,options)=>{
+  assert.equal(f.calls.at(-1)[0],'sync','local follows the server before remote clients');
+  remoteCalls.push({targets,ids,action,options});
+  return {ok:true,action,results:targets.map(target=>({id:target.id,ok:true,result:{ok:true,cacheChanged:true,cacheRepaired:true,restartCodex:true}}))};
+ }});
+ f.state.serverResult={ok:true,changed:false};f.state.clientResult={ok:true,catalogChanged:false,cacheChanged:true,cacheRepaired:true,restartCodex:true,warnings:[]};
+ await f.call('remote-clients',{target:{host:'user@client.test',configPath:'/home/user/.codex/config.toml'}});
+ assert.equal((await f.call('refresh-server-catalog',{})).status,202);
+ await new Promise(r=>setTimeout(r,10));const status=await f.call('status').then(r=>r.json());
+ assert.deepEqual(f.calls[0],{a:'catalog',args:{}});assert.equal(f.calls[1][0],'sync');
+ assert.equal(remoteCalls.length,1);assert.equal(remoteCalls[0].ids,'all');assert.equal(remoteCalls[0].action,'sync');
+ assert.deepEqual(remoteCalls[0].options,{expectedUpstreamUrl:'http://server.test/v1',sourceControlInstance:status.controlInstance,requireCacheRepair:true});
+ assert(!JSON.stringify(remoteCalls).includes(f.key));
+ assert.equal(status.job.status,'succeeded');assert.equal(status.job.result.serverRefreshed,true);
+ assert.equal(status.job.result.clientSync.local.cacheRepaired,true);assert.equal(status.job.result.clientSync.remote.results.length,1);
+});
+
+test('client failures preserve successful server result, keep other clients running and require only client retry',async t=>{
+ let remoteCount=0;const f=await fixture(t,{remoteClients:async()=>{remoteCount++;return {ok:false,action:'sync',results:[
+  {id:'online',ok:true,result:{ok:true,changed:false}},{id:'offline',ok:false,error:'REMOTE_SSH_FAILED'}]};}});
+ await f.call('remote-clients',{target:{host:'user@client.test',configPath:'/home/user/.codex/config.toml'}});
+ f.state.clientFails=true;f.state.serverResult={ok:true,unchanged:true,updates:[{component:'opencodex',version:'2.100.2'}]};
+ assert.equal((await f.call('update',{component:'opencodex',version:'2.100.2',confirm:true})).status,202);
+ await new Promise(r=>setTimeout(r,10));const status=await f.call('status').then(r=>r.json());
+ assert.equal(status.job.status,'partial');assert.equal(status.job.error,undefined);assert.equal(status.job.result.serverApplied,true);
+ assert.equal(status.job.result.unchanged,true);assert.equal(status.job.result.clientSync.local.error,'CLIENT_SYNC_FAILED');
+ assert.equal(status.job.result.clientSync.remote.results[0].ok,true);assert.equal(remoteCount,1);
+ assert(!JSON.stringify(status).includes('fixture secret'));assert.match(status.job.result.message,/서버 작업은 완료/);
+});
+
+test('server refresh failure does not modify or synchronize any client',async t=>{
+ let remoteCount=0;const f=await fixture(t,{remoteClients:async()=>{remoteCount++;return {ok:true};}});
+ f.state.serverFails=true;const before=fs.readFileSync(f.configPath);
+ await f.call('refresh-server-catalog',{});await new Promise(r=>setTimeout(r,10));const status=await f.call('status').then(r=>r.json());
+ assert.equal(status.job.status,'failed');assert.equal(status.job.result,undefined);
+ assert.equal(f.calls.filter(Array.isArray).length,0);assert.equal(remoteCount,0);assert.deepEqual(fs.readFileSync(f.configPath),before);
 });

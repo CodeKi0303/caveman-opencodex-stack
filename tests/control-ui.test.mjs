@@ -294,3 +294,28 @@ test('saving the registry locks controls and retains edits made while the reques
  f.element('remote-label').value='계속 편집 중';await f.element('remote-client-form').dispatch('input');hold.resolve();await saving;
  assert.equal(f.element('remote-label').value,'계속 편집 중');assert.equal(f.element('remote-id').value,'linux-pc');assert(f.mutating.every(element=>!element.disabled));
 });
+
+test('cache-only sync repair is visible even when the server catalog did not change',async()=>{
+ const f=await fixture();f.state.status.job={id:'repair',action:'sync',status:'succeeded',result:{ok:true,changed:true,catalogChanged:false,cacheChanged:true,cacheRepaired:true,restartCodex:true,warnings:[]}};
+ await f.tick();assert.match(f.element('job-result').textContent,/Codex 캐시 복구/);assert.match(f.element('job-result').textContent,/Codex를 재시작/);
+ assert(!f.element('job-result').textContent.includes('변경이 없습니다'));
+});
+
+test('a successful server update with a failed client shows partial completion and applied versions',async()=>{
+ const f=await fixture();f.state.status.job={id:'linked',action:'update',status:'partial',result:{ok:true,serverApplied:true,updates:[{component:'opencodex',version:'2.100.2'}],message:'서버 작업은 완료했습니다.',clientSync:{ok:false,local:{ok:true,cacheRepaired:true},remote:{ok:false,action:'sync',results:[
+  {id:'good',label:'온라인 PC',host:'good.test',ok:true,result:{ok:true,configChanged:true,restartCodex:true}},
+  {id:'other',label:'다른 Pod PC',host:'other.test',ok:true,result:{ok:true,skipped:true,reason:'REMOTE_POD_MISMATCH'}},
+  {id:'bad',label:'꺼진 PC',host:'bad.test',ok:false,error:'REMOTE_SSH_FAILED'}]}}}};
+ await f.tick();const text=f.element('job-result').textContent;
+ assert.equal(f.element('job-badge').textContent,'부분 완료');assert.equal(f.element('opencodex-current').textContent,'2.100.2');
+ assert.match(text,/서버 작업은 완료/);assert.match(text,/이 PC: Codex 캐시 복구/);
+ assert.match(text,/완료 1대 · 실패 1대 · 건너뜀 1대/);assert.match(text,/다른 Pod에 연결/);assert.match(text,/꺼진 PC/);
+ assert.equal(f.element('notice').hidden,false);assert(!f.element('notice').className.includes('error'));
+});
+
+test('server catalog refresh is one explicit action and periodic polling never starts the linked sync',async()=>{
+ const f=await fixture();assert.match(html,/서버 갱신 \+ PC 동기화/);
+ await f.tick();await f.tick();assert(f.calls.every(c=>c.method==='GET'));
+ await f.element('server-catalog').dispatch('click');await settle();
+ const posts=f.calls.filter(c=>c.method==='POST');assert.equal(posts.length,1);assert.equal(posts[0].url,'/api/refresh-server-catalog');
+});

@@ -55,6 +55,23 @@ function validateSettings(settings) {
   return {upstreamUrl:upstream.href,key:settings.key,compression:settings.compression,clientAuthMode:settings.clientAuthMode};
 }
 
+function validateSyncOptions(value) {
+  if(value===undefined)return {};
+  if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(key=>!['expectedUpstreamUrl','sourceControlInstance','requireCacheRepair'].includes(key)))fail('INVALID_REMOTE_SETTINGS');
+  const result={};
+  if(value.expectedUpstreamUrl!==undefined){
+    let url;try{url=new URL(value.expectedUpstreamUrl);}catch{fail('INVALID_REMOTE_SETTINGS');}
+    if(!['http:','https:'].includes(url.protocol)||url.username||url.password||url.search||url.hash||!['/v1','/v1/'].includes(url.pathname))fail('INVALID_REMOTE_SETTINGS');
+    url.pathname='/v1';result.expectedUpstreamUrl=url.href;
+  }
+  if(value.sourceControlInstance!==undefined){
+    if(typeof value.sourceControlInstance!=='string'||!/^[a-z0-9-]{1,64}$/i.test(value.sourceControlInstance))fail('INVALID_REMOTE_SETTINGS');
+    result.sourceControlInstance=value.sourceControlInstance;
+  }
+  if(value.requireCacheRepair!==undefined){if(typeof value.requireCacheRepair!=='boolean')fail('INVALID_REMOTE_SETTINGS');result.requireCacheRepair=value.requireCacheRepair;}
+  return result;
+}
+
 // Neither bootstrap interpolates a host, path or credential into shell code.
 // Only this constant source is encoded in argv; all values and worker source use stdin.
 const linuxBootstrap=String.raw`import base64,json,os,shutil,subprocess,sys
@@ -111,7 +128,8 @@ try {
 export function buildRemoteClientRequest(target,action,settings,{checkKeyFile=true}={}) {
   const t=validateRemoteTarget(target,{checkKeyFile});
   if(!actions.has(action))fail('INVALID_REMOTE_ACTION');
-  const request={action,configPath:t.configPath,...(action==='apply'?{settings:validateSettings(settings)}:{})};
+  const request={action,configPath:t.configPath,...(action==='apply'?{settings:validateSettings(settings)}:
+    action==='sync'?validateSyncOptions(settings):{})};
   const command=t.platform==='windows'
     ?'powershell.exe -NoProfile -NonInteractive -EncodedCommand '+Buffer.from(windowsBootstrap,'utf16le').toString('base64')
     :`python3 -c "import base64;exec(base64.b64decode('${Buffer.from(linuxBootstrap).toString('base64')}'))"`;
@@ -148,6 +166,7 @@ export async function runRemoteClients(targets,ids,action,settings,{command=remo
   const list=validateRemoteTargets(targets,{checkKeyFile:false});
   if(!actions.has(action))fail('INVALID_REMOTE_ACTION');
   if(action==='apply')settings=validateSettings(settings);
+  if(action==='sync')settings=validateSyncOptions(settings);
   if(ids!=='all'&&(!Array.isArray(ids)||!ids.length||ids.some(id=>typeof id!=='string')||new Set(ids).size!==ids.length))fail('INVALID_REMOTE_SELECTION');
   const selected=ids==='all'?list:list.filter(t=>ids.includes(t.id));
   if(!selected.length||(ids!=='all'&&selected.length!==ids.length))fail('INVALID_REMOTE_SELECTION');

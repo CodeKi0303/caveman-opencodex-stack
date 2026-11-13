@@ -4,6 +4,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import {fileURLToPath} from 'node:url';
 import {createManager,parseArgs,safeError,normalizeUrl,validatePort,readEnvironment,interactive,repository} from './manage-lib.mjs';
+import {syncResultMessage} from './sync-result.mjs';
 
 export const help=`Caveman + OpenCodex 올인원 설치 / 관리
 
@@ -169,7 +170,7 @@ export async function menu(io,manager,{setupOnly=false}={}) {
       else if(choice==='3')await manager.login();
       else if(choice==='10')await manager.startCodex(expand(await io.ask('Codex에서 사용할 작업 폴더',process.cwd())));
       else if(choice==='4'){const d=await manager.doctor();io.write(d.ok?'연결 진단 정상':'확인 필요: '+d.warnings.join(', '));}
-      else if(choice==='5'){const s=await manager.sync();io.write(s.catalogChanged?'모델 목록을 갱신했습니다. Codex를 재시작하세요.':'모델 목록에 변경이 없습니다.');}
+      else if(choice==='5'){const s=await manager.sync();io.write(syncResultMessage(s));}
       else if(choice==='6'){const enabled=await io.confirm('Caveman 압축을 사용할까요?',manager.settings()?.compression!==false);await manager.setCompression(enabled);io.write(`Caveman ${enabled?'ON':'OFF'}: 새 모델 요청부터 적용합니다.`);}
       else if(choice==='7'){const v=await manager.versions();for(const [name,item] of Object.entries(v.components))io.write(`${name}: 실행 중 ${item.current} / 최신 ${item.latest??'조회 실패'}`);}
       else if(choice==='8'){

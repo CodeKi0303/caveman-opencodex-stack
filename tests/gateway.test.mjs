@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {once} from 'node:events';
 import {createGateway,addressPolicy} from '../src/gateway.mjs';
+import {createCatalogRefresher} from '../src/catalog-refresh.mjs';
 import TOML from '@iarna/toml';
 
 const key='a'.repeat(64);
@@ -153,6 +154,32 @@ test('catalog supports authenticated HEAD and conditional reads and changes ETag
   const changed=await fetch(f.url+'/v1/catalog',{headers:{...headers,'if-none-match':etag}});
   assert.equal(changed.status,200);assert.notEqual(changed.headers.get('etag'),etag);
   assert.equal((await changed.json()).models[0].slug,'new');
+});
+
+test('catalog refresh precedes ETag checks; authentication and refresh failure cannot serve stale success',async t=>{
+  let refresh,calls=0,offline=false;
+  let catalog={models:[{slug:'test',display_name:'Test',context_window:272000}]};
+  const f=await fixture(t,1024,{refreshCatalog:()=>refresh()});
+  refresh=createCatalogRefresher({url:'http://upstream.test/v1/models',output:f.catalog,fetchImpl:async()=>{
+    calls++;if(offline)throw Error('Private upstream details');return Response.json(catalog);
+  }});
+  assert.equal((await fetch(f.url+'/v1/catalog')).status,401);assert.equal(calls,0);
+  const headers={'x-caveman-gateway-key':key};
+  const first=await fetch(f.url+'/v1/catalog',{headers}),etag=first.headers.get('etag');
+  assert.equal((await first.json()).models[0].context_window,272000);
+  const conditional={...headers,'if-none-match':etag};
+  assert.equal((await fetch(f.url+'/v1/catalog',{headers:conditional})).status,304);
+  catalog.models[0].context_window=872000;
+  const changed=await fetch(f.url+'/v1/catalog',{headers:conditional});
+  assert.equal(changed.status,200);assert.notEqual(changed.headers.get('etag'),etag);
+  assert.equal((await changed.json()).models[0].context_window,872000);
+  const saved=fs.readFileSync(f.catalog,'utf8');offline=true;
+  const failed=await fetch(f.url+'/v1/catalog',{headers:conditional});
+  assert.equal(failed.status,503);assert(!(await failed.text()).includes('Private upstream'));
+  assert.equal(fs.readFileSync(f.catalog,'utf8'),saved);
+  offline=false;
+  const head=await fetch(f.url+'/v1/catalog',{method:'HEAD',headers});assert.equal(head.status,200);assert.equal(await head.text(),'');
+  assert.equal((await fetch(f.url+'/v1/stack-info',{headers}).then(r=>r.json())).capabilities.catalogRefreshOnRead,true);
 });
 
 test('gateway preserves Codex attribution headers while removing its gateway key',async t=>{

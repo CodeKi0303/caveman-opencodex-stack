@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {runClient,ClientError} from './client-lib.mjs';
+import {syncResultMessage} from './sync-result.mjs';
 
 export async function manualSync(home,{run=runClient}={}) {
   home=path.resolve(home);
@@ -13,10 +14,7 @@ export async function manualSync(home,{run=runClient}={}) {
       !path.isAbsolute(config.keyFile)||typeof config.codexHome!=='string'||path.resolve(config.codexHome)!==home)
     throw new ClientError('INVALID_SETTINGS','수동 동기화 설정이 올바르지 않습니다. 연결 설정을 다시 실행해 주세요.');
   const result=await run(['sync','--url',config.url,'--key-file',config.keyFile,'--codex-home',home]);
-  const warning=Boolean(result.warnings?.length);
-  return {...result,message:(result.catalogChanged?'모델 목록 갱신 완료.':'모델 목록에 변경이 없습니다.')+
-    (result.restartCodex?' 새 목록을 사용하려면 Codex를 재시작해 주세요.':'')+
-    (warning?' 연결 설정에 경고가 있습니다. doctor로 확인해 주세요.':'')};
+  return {...result,message:syncResultMessage(result)};
 }
 
 export async function main(argv) {

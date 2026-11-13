@@ -6,6 +6,7 @@ import {readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {Transform} from 'node:stream';
 import {clientAuthHeaders} from './client-auth-headers.mjs';
+import {createCatalogRefresher} from './catalog-refresh.mjs';
 
 // Keep OpenCodex's 256 MiB default, with its supported 512 MiB opt-in ceiling.
 // The supervisor also passes MAX_REQUEST_BYTES to Caveman.
@@ -46,7 +47,7 @@ export function requestMetadata(req) {
     account_id_present:typeof req.headers['chatgpt-account-id'] === 'string',
     gateway_key_present:typeof req.headers['x-caveman-gateway-key'] === 'string'};
 }
-export function createGateway({key, request = http.request, audit = () => {}, maxRequestBytes = MAX_REQUEST_BYTES, allowedAddress = addressPolicy(), tls, catalogPath, recoveryMcp, clientAuthMode = 'forward'} = {}) {
+export function createGateway({key, request = http.request, audit = () => {}, maxRequestBytes = MAX_REQUEST_BYTES, allowedAddress = addressPolicy(), tls, catalogPath, refreshCatalog, recoveryMcp, clientAuthMode = 'forward'} = {}) {
   validateLimit(maxRequestBytes);
   if (typeof key !== 'string' || key.length < 32) throw Error('Gateway key must be at least 32 characters');
   if (!['forward','server'].includes(clientAuthMode)) throw Error('Invalid client authentication mode');
@@ -72,7 +73,7 @@ export function createGateway({key, request = http.request, audit = () => {}, ma
         !timingSafeEqual(Buffer.from(supplied),Buffer.from(key))) return sendError(res,401,'Gateway key required');
     if(req.method==='GET'&&req.url==='/v1/stack-info') {
       res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'}).end(JSON.stringify({
-        service:'caveman-lan-gateway',capabilities:{compressionSwitch:true},clientAuthMode}));return;
+        service:'caveman-lan-gateway',capabilities:{compressionSwitch:true,catalogRefreshOnRead:typeof refreshCatalog==='function'},clientAuthMode}));return;
     }
     if (req.url === '/mcp') {
       if (recoveryClosed) return sendError(res,503,'Recovery is shutting down');
@@ -83,6 +84,8 @@ export function createGateway({key, request = http.request, audit = () => {}, ma
       return;
     }
     if ((req.method === 'GET' || req.method === 'HEAD') && req.url === '/v1/catalog') {
+      const serveCatalog=()=>{
+      if(res.destroyed||res.writableEnded)return;
       try {
         const data = readFileSync(catalogPath);
         const etag = '"' + createHash('sha256').update(data).digest('hex') + '"';
@@ -93,6 +96,12 @@ export function createGateway({key, request = http.request, audit = () => {}, ma
         if (matches) res.writeHead(304,headers).end();
         else res.writeHead(200,{...headers,'content-length':data.length}).end(req.method === 'HEAD' ? undefined : data);
       } catch { sendError(res,503,'Run stack catalog first'); }
+      };
+      // Validate the current upstream catalog BEFORE evaluating a client's ETag.
+      // A failed refresh must not claim a stale snapshot is current with a 304.
+      if(refreshCatalog)void Promise.resolve().then(refreshCatalog).then(serveCatalog)
+        .catch(()=>sendError(res,503,'Catalog refresh failed; previous snapshot retained'));
+      else serveCatalog();
       return;
     }
     const metadata = requestMetadata(req);
@@ -212,6 +221,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     key:readFileSync('/run/secrets/gateway-key','utf8').trim(),
     allowedAddress:addressPolicy(process.env.ALLOWED_CIDRS || ''),tls,
     catalogPath:'/state/catalog/models.json',
+    refreshCatalog:createCatalogRefresher({
+      url:'http://127.0.0.1:10101/v1/models?client_version='+encodeURIComponent(
+        JSON.parse(readFileSync(new URL('../package.json',import.meta.url),'utf8')).dependencies['@openai/codex']),
+      output:'/state/catalog/models.json'
+    }),
     clientAuthMode:process.env.CLIENT_AUTH_MODE ?? 'forward',
     audit:record=>console.log(JSON.stringify(record))
   });

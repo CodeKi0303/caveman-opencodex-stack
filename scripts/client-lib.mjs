@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {createHash, randomUUID} from 'node:crypto';
+import {isDeepStrictEqual} from 'node:util';
 import {parseConfig, patchConfig, effectiveConfig, ConfigError, REMOVE, at} from './client-config.mjs';
 import {summarizeCatalog} from './catalog-summary.mjs';
 
@@ -29,6 +30,30 @@ export function validateCatalog(value) {
   return value;
 }
 function localCatalog(file) {try{return validateCatalog(jsonRead(file));}catch{return null;}}
+const cacheSnapshotTime='2000-01-01T00:00:00Z',cacheSnapshotVersion='0.0.0';
+function inspectModelCache(bytes,catalog) {
+  let value;
+  try {value=bytes===null?null:JSON.parse(bytes.toString('utf8'));}catch{}
+  let valid=false;
+  try {
+    validateCatalog(value);
+    valid=typeof value.fetched_at==='string'&&/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value.fetched_at)&&Number.isFinite(Date.parse(value.fetched_at))&&
+      typeof value.client_version==='string'&&value.client_version.trim().length>0&&
+      (value.etag===undefined||value.etag===null||typeof value.etag==='string');
+  }catch{}
+  const compatibilitySnapshot=value?.fetched_at===cacheSnapshotTime&&value?.client_version===cacheSnapshotVersion;
+  const modelsMatch=valid&&catalog?isDeepStrictEqual(value.models,catalog.models):null;
+  // Native caches have their own identity and discovery defaults. They can
+  // legitimately differ from a custom startup catalog and belong to Codex.
+  // Only missing/broken caches or this tool's stale snapshot are repaired.
+  return {exists:bytes!==null,valid,modelsMatch,compatibilitySnapshot,
+    repairNeeded:!valid||(compatibilitySnapshot&&modelsMatch===false)};
+}
+function modelCacheSnapshot(catalog) {
+  // Deliberately expired: do not impersonate a fresh identity-bound Codex
+  // discovery response. model_catalog_json is the authoritative startup file.
+  return JSON.stringify({fetched_at:cacheSnapshotTime,client_version:cacheSnapshotVersion,models:catalog.models})+'\n';
+}
 function apiBase(value) {
   let url;
   try {url=new URL(value);}catch{fail('INVALID_URL','Expected an HTTP(S) API URL ending in /v1.');}
@@ -170,7 +195,7 @@ async function catalogRequest(base,key,auth,local,metadata,fetchFn,exportMode) {
     try {response=await fetchFn(endpoint,{headers,redirect:'error',signal:AbortSignal.timeout(30000)});}
     catch {fail('CATALOG_UNREACHABLE','Catalog request failed. Check the endpoint, network and certificate trust. Existing files were kept.');}
     if(response.status===304) {
-      if(local)return {catalog:local,etag:response.headers.get('etag')??metadata?.etag??null,notModified:true};
+      if(local&&headers['if-none-match'])return {catalog:local,etag:response.headers.get('etag')??metadata?.etag??null,notModified:true};
       delete headers['if-none-match'];continue;
     }
     if(!response.ok)fail('CATALOG_HTTP_'+response.status,'Catalog request failed (HTTP '+response.status+'). Existing files were kept.');
@@ -252,7 +277,7 @@ export async function runClient(argv,{fetchFn=fetch}={}) {
 }
 async function execute(argv,fetchFn) {
   const parsed=parseArgs(argv);
-  if(parsed.help)return {ok:true,commands,options:['--url','--key-file','--codex-home','--provider','--bridge-url','--client-auth-mode','--output','--auth-file'],sync:'Catalog and ETag metadata only; unchanged catalog and metadata produce no writes or backups.',reconfigure:'Updates one existing provider (selected provider by default) and HTTP MCP; preserves its client authentication mode unless explicitly selected.',clientAuthMode:'Custom providers support forward (client login) or server (gateway key only). Built-in openai keeps its local login and uses the native bridge authentication policy.',openai:'Use configure --provider openai --bridge-url http://127.0.0.1:PORT/v1 after starting the native bridge. --url remains the authenticated remote gateway for catalog and MCP.'};
+  if(parsed.help)return {ok:true,commands,options:['--url','--key-file','--codex-home','--provider','--bridge-url','--client-auth-mode','--output','--auth-file'],sync:'Synchronizes the startup catalog and reference, and repairs missing or invalid compatibility cache snapshots even on HTTP 304. Valid native Codex caches are preserved. Healthy unchanged files produce no writes or backups.',reconfigure:'Updates one existing provider (selected provider by default) and HTTP MCP; preserves its client authentication mode unless explicitly selected.',clientAuthMode:'Custom providers support forward (client login) or server (gateway key only). Built-in openai keeps its local login and uses the native bridge authentication policy.',openai:'Use configure --provider openai --bridge-url http://127.0.0.1:PORT/v1 after starting the native bridge. --url remains the authenticated remote gateway for catalog and MCP.'};
   const {command,opts}=parsed,base=apiBase(opts.url||'http://127.0.0.1:18787/v1');
   let key;
   try {key=fs.readFileSync(opts['key-file'],'utf8').trim();}catch{fail('KEY_FILE_UNREADABLE','Cannot read the gateway key file.');}
@@ -285,8 +310,8 @@ async function execute(argv,fetchFn) {
   let auth;
   if(opts['auth-file']) {auth=jsonRead(opts['auth-file']);if(!auth)fail('AUTH_FILE_INVALID','The supplied auth file is unreadable or invalid.');}
   if(command==='doctor') {
-    let remote;
-    try {const result=await catalogRequest(base,key,undefined,local,metadata,fetchFn,false),summary=summarizeCatalog(result.catalog);remote={ok:true,models:summary.count,totalModels:summary.totalCount,hiddenModels:summary.hiddenCount,notModified:result.notModified};}
+    let remote,serverCatalog;
+    try {const result=await catalogRequest(base,key,undefined,local,metadata,fetchFn,false),summary=summarizeCatalog(result.catalog);serverCatalog=result.catalog;remote={ok:true,models:summary.count,totalModels:summary.totalCount,hiddenModels:summary.hiddenCount,notModified:result.notModified};}
     catch(error){remote={ok:false,error:error instanceof ClientError?error.code:'CATALOG_UNAVAILABLE'};}
     const mcp=await inspectMcp(mcpUrl(base),key,fetchFn),authState={...authMetadata(opts['auth-file']||path.join(home,'auth.json')),
       required:report.provider==='openai'||report.clientAuthMode!=='server'};
@@ -296,8 +321,13 @@ async function execute(argv,fetchFn) {
     const warnings=[...report.warnings];
     if(!local)warnings.push('local_catalog_invalid_or_missing');
     if(!refMatches)warnings.push('catalog_reference_mismatch');
+    const serverMatches=serverCatalog?!!local&&isDeepStrictEqual(local,serverCatalog):null;
+    if(serverMatches===false)warnings.push('catalog_server_mismatch');
+    const cache=inspectModelCache(cacheBefore,serverCatalog??local);
+    if(!cache.valid)warnings.push('models_cache_invalid_or_missing');
+    else if(cache.repairNeeded)warnings.push('models_cache_snapshot_outdated');
     if(authState.required&&!authState.usable)warnings.push(authState.status);
-    return {ok:warnings.length===0&&remote.ok&&mcp.ok&&(!bridge||bridge.ok),command,provider:report.provider,selectedProvider:report.selectedProvider,profile:report.profile,clientAuthMode:report.clientAuthMode,warnings,catalog:{localValid:!!local,referenceMatches:refMatches,...remote},auth:authState,mcp,bridge,restartNotice:'Existing Codex processes or resumed chats may retain old provider settings. This command does not restart them.'};
+    return {ok:warnings.length===0&&remote.ok&&mcp.ok&&(!bridge||bridge.ok),command,provider:report.provider,selectedProvider:report.selectedProvider,profile:report.profile,clientAuthMode:report.clientAuthMode,warnings,catalog:{localValid:!!local,referenceMatches:refMatches,serverMatches,...remote,ok:remote.ok&&!!local&&refMatches&&serverMatches!==false},cache,auth:authState,mcp,bridge,restartNotice:'The custom model catalog is loaded at Codex startup. Cache repair does not reload running processes. Existing processes or resumed chats may retain old provider settings; restart Codex to apply changes.'};
   }
   let configured=null;
   if(command==='configure'||command==='reconfigure') {
@@ -308,7 +338,8 @@ async function execute(argv,fetchFn) {
     }
   }
   const fetched=await catalogRequest(base,key,auth,local,metadata,fetchFn,command==='export');
-  const data=normalized(fetched.catalog),catalogChanged=!local||normalized(local)!==data;
+  const catalogChanged=!local||!isDeepStrictEqual(local,fetched.catalog);
+  const data=normalized(catalogChanged?fetched.catalog:local);
   if(command==='export') {
     const output=path.resolve(opts.output||'/state/catalog/models.json'),before=read(output),changed=before===null||!before.equals(Buffer.from(data));
     if(changed){fs.mkdirSync(path.dirname(output),{recursive:true,mode:0o700});atomic(output,data);}
@@ -322,18 +353,15 @@ async function execute(argv,fetchFn) {
       url:base,keyFile:path.resolve(opts['key-file']),codexHome:home,node:process.execPath,
       ...(configured.provider==='openai'?{provider:'openai',bridgeUrl}:{} )},null,2)+'\n'});
   }
-  if(catalogChanged) {
-    planned.push({file:catalogFile,before:catalogBefore,after:data},
-      {file:cacheFile,before:cacheBefore,after:JSON.stringify({fetched_at:'2000-01-01T00:00:00Z',client_version:'0.0.0',models:fetched.catalog.models})+'\n'});
-  }
-  if(command==='sync'&&!catalogChanged) {
-    const backup=commitFiles(home,planned);
-    return {ok:true,command,changed:backup!==null,catalogChanged:false,notModified:fetched.notModified,catalog:catalogFile,clientAuthMode:report.clientAuthMode,backup,warnings:report.warnings,restartCodex:false};
-  }
-  // Backward-compatible first sync installs only the local catalog reference.
+  if(catalogChanged)planned.push({file:catalogFile,before:catalogBefore,after:data});
+  const cache=inspectModelCache(cacheBefore,fetched.catalog),cacheChanged=cache.repairNeeded;
+  if(cacheChanged)planned.push({file:cacheFile,before:cacheBefore,after:modelCacheSnapshot(fetched.catalog)});
+  // Sync also repairs a missing/stale local reference when the server returns
+  // 304. A matching download does not establish that client files are healthy.
   // It never changes provider endpoints, gateway headers, MCP or credentials.
   const nextConfig=configured?.text??configuredText(cfgBefore?.toString('utf8')??'',config,'sync',base,key,catalogFile,requestedProvider,bridgeUrl).text;
+  const configChanged=nextConfig!==(cfgBefore?.toString('utf8')??'');
   planned.push({file:cfgFile,before:cfgBefore,after:nextConfig});
   const backup=commitFiles(home,planned),afterReport=connectionReport(parseConfig(nextConfig),base,key,configured?.provider??requestedProvider,bridgeUrl,requestedClientAuthMode);
-  return {ok:true,command,changed:backup!==null,catalogChanged,catalog:catalogFile,provider:configured?.provider??report.provider,selectedProvider:afterReport.selectedProvider,clientAuthMode:afterReport.clientAuthMode,mcp:command==='sync'?undefined:mcpUrl(base),backup,warnings:afterReport.warnings,restartCodex:catalogChanged||nextConfig!==(cfgBefore?.toString('utf8')??'')};
+  return {ok:true,command,changed:backup!==null,catalogChanged,cacheChanged,cacheRepaired:cacheChanged,configChanged,notModified:fetched.notModified,catalog:catalogFile,provider:configured?.provider??report.provider,selectedProvider:afterReport.selectedProvider,clientAuthMode:afterReport.clientAuthMode,mcp:command==='sync'?undefined:mcpUrl(base),backup,warnings:afterReport.warnings,restartCodex:catalogChanged||cacheChanged||configChanged};
 }

@@ -61,6 +61,7 @@ export function createControlPanel({configPath,fetchFn=fetch,client=runClient,re
  configPath=path.resolve(configPath);
  const home=path.dirname(path.dirname(configPath));
  const csrf=randomBytes(32).toString('hex');
+ const controlInstance=randomUUID();
  let job=null,busy=false;
  const settings=()=>read(configPath);
  const targetsPath=path.join(path.dirname(configPath),'remote-clients.json');
@@ -90,7 +91,7 @@ export function createControlPanel({configPath,fetchFn=fetch,client=runClient,re
   let catalog={count:0,totalCount:0,hiddenCount:0};try{const file=path.join(home,'opencodex-catalog.json'),data=read(file);if(!Array.isArray(data.models))throw Error();catalog={...summarizeCatalog(data),modified:fs.statSync(file).mtime.toISOString()};}catch{}
   if(catalog.totalCount===0)alerts.push({id:'catalog-empty',severity:'warning',message:'로컬 모델 목록이 비어 있습니다. 모델 목록 동기화를 실행하세요.'});
   else if(catalog.count===0)alerts.push({id:'catalog-no-selectable',severity:'warning',message:'선택 가능한 로컬 모델이 없습니다. OpenCodex에서 사용할 모델을 선택한 뒤 모델 목록을 동기화하세요.'});
-  return {ok:true,checkedAt:new Date().toISOString(),capabilities:{remoteClientManagement:1},remoteClients:targets(),settings:safeSettings(c),bridge,gateway:gatewayState,authentication,alerts,catalog,job,busy};
+  return {ok:true,checkedAt:new Date().toISOString(),controlInstance,capabilities:{remoteClientManagement:1,catalogSyncRepair:1},remoteClients:targets(),settings:safeSettings(c),bridge,gateway:gatewayState,authentication,alerts,catalog,job,busy};
  }
  function status(){return statusPending??=readStatus().finally(()=>{statusPending=undefined;});}
  async function save(body){
@@ -147,22 +148,53 @@ export function createControlPanel({configPath,fetchFn=fetch,client=runClient,re
     new Set(body.ids).size!==body.ids.length||body.ids.some(id=>typeof id!=='string'||!targets().some(t=>t.id===id)))throw Error('INVALID_REMOTE_SELECTION');
   if(body.action==='apply'&&body.confirm!==true)throw Error('REMOTE_CONFIRMATION_REQUIRED');
  }
+ const safeError=error=>/^[A-Z][A-Z0-9_]{1,79}$/.test(error?.code??error?.message)?(error.code??error.message):'CLIENT_SYNC_FAILED';
+ const syncSummary=result=>({ok:result.ok===true,changed:result.changed===true||result.catalogChanged===true||result.cacheChanged===true||result.configChanged===true,
+  catalogChanged:result.catalogChanged===true,cacheChanged:result.cacheChanged===true,cacheRepaired:result.cacheRepaired===true,
+  configChanged:result.configChanged===true,restartCodex:result.restartCodex===true,warnings:result.warnings??[]});
+ async function syncLocal(c){
+  if(validUrl(settings().upstreamUrl)!==validUrl(c.upstreamUrl))throw Error('CONCURRENT_EDIT');
+  return syncSummary(await client(['sync','--url',c.upstreamUrl,'--key-file',c.keyFile,'--codex-home',home]));
+ }
+ async function syncLinkedClients(c){
+  let local,remoteResult;
+  try{local=await syncLocal(c);}catch(error){local={ok:false,error:safeError(error)};}
+  try{
+   const list=targets();
+   remoteResult=list.length?await remoteClients(list,'all','sync',{
+    expectedUpstreamUrl:c.upstreamUrl,sourceControlInstance:controlInstance,requireCacheRepair:true}):{ok:true,action:'sync',results:[]};
+  }catch(error){remoteResult={ok:false,action:'sync',results:[],error:safeError(error)};}
+  return {ok:local.ok&&remoteResult.ok,local,remote:remoteResult};
+ }
  function startJob(action,body){
   busy=true;job={id:randomUUID(),action,status:'running',started:new Date().toISOString()};
   const c=settings();
   (async()=>{
    if(action==='remote-client-action'){
     job.result=await remoteClients(targets(),body.ids,body.action,body.action==='apply'?{
-     upstreamUrl:c.upstreamUrl,key:key(c),compression:c.compression!==false,clientAuthMode:c.clientAuthMode??'forward'}:undefined);
+     upstreamUrl:c.upstreamUrl,key:key(c),compression:c.compression!==false,clientAuthMode:c.clientAuthMode??'forward'}:
+     body.action==='sync'?{requireCacheRepair:true}:undefined);
     if(!job.result.ok)throw Error('REMOTE_CLIENTS_PARTIAL_FAILURE');
    }else if(action==='sync'||action==='doctor'){
     const result=await client([action==='sync'?'sync':'doctor','--url',c.upstreamUrl,'--key-file',c.keyFile,'--codex-home',home,...(action==='doctor'?['--provider','openai','--bridge-url',`http://127.0.0.1:${c.port}/v1`]:[])]);
-    job.result=action==='sync'?{ok:result.ok,changed:result.catalogChanged,restartCodex:result.restartCodex,warnings:result.warnings}:result;
+    job.result=action==='sync'?syncSummary(result):result;
     if(!result.ok)throw Error('DOCTOR_FAILED');
    }else{
     job.result=await remote(c,action==='check-update'?'check':action==='refresh-server-catalog'?'catalog':'update',action==='update'?(Object.hasOwn(body,'updates')?{updates:validateUpdatePlan(body)}:{component:body.component,version:body.version}):{});
+    if(action==='refresh-server-catalog'||action==='update'){
+     if(job.result.ok!==true)throw Error('SERVER_OPERATION_FAILED');
+     job.result={...job.result,serverApplied:true,...(action==='refresh-server-catalog'?{serverRefreshed:true}:{}),clientSync:null};
+     job.phase='client-sync';
+     // A matching server catalog says nothing about another PC's missing cache.
+     // Always inspect every client, including after an unchanged server update.
+     job.result.clientSync=await syncLinkedClients(c);
+     job.result.restartCodex=job.result.clientSync.local.restartCodex===true;
+     job.result.message=job.result.clientSync.ok?'서버 작업과 연결된 PC의 모델 목록 동기화를 완료했습니다.':
+      '서버 작업은 완료했습니다. 일부 PC의 동기화 결과를 확인한 뒤 해당 PC만 다시 동기화하세요.';
+     if(!job.result.clientSync.ok)job.status='partial';
+    }
    }
-   job.status='succeeded';
+   if(job.status!=='partial')job.status='succeeded';
   })().catch(error=>{job.status='failed';job.error=/^[A-Z_]+$/.test(error.code??error.message)?(error.code??error.message):'OPERATION_FAILED';}).finally(()=>{job.finished=new Date().toISOString();busy=false;});
   return {ok:true,job};
  }
@@ -187,6 +219,7 @@ export function createControlPanel({configPath,fetchFn=fetch,client=runClient,re
    if(!body||typeof body!=='object'||Array.isArray(body))throw Error('INVALID_INPUT');
    if(busy)return json(res,409,{error:'OPERATION_BUSY'});
    if(req.url==='/api/settings'){busy=true;try{return json(res,200,await save(body));}finally{busy=false;}}
+   if(req.url==='/api/sync'&&body.expectedUpstreamUrl!==undefined&&validUrl(body.expectedUpstreamUrl)!==validUrl(settings().upstreamUrl))throw Error('REMOTE_POD_MISMATCH');
    if(req.url==='/api/remote-clients')return json(res,200,saveTarget(body));
    if(req.url==='/api/remote-client-action')validateRemoteAction(body);
    if(req.url==='/api/update')validateUpdatePlan(body);

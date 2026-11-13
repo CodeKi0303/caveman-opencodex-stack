@@ -30,3 +30,13 @@ test('manual sync requires explicit setup and distinguishes changed catalogs',as
   const result=await manualSync(home,{run:async()=>({ok:true,catalogChanged:true,restartCodex:true,warnings:[]})});
   assert.match(result.message,/갱신 완료/);assert.match(result.message,/재시작/);
 });
+
+test('double-click sync reports cache or reference repair even when catalog returns unchanged',async t=>{
+  const home=fs.mkdtempSync(path.join(os.tmpdir(),'manual-repair-'));
+  t.after(()=>fs.rmSync(home,{recursive:true,force:true}));
+  fs.writeFileSync(path.join(home,'caveman-client.json'),JSON.stringify({version:1,url:'http://localhost/v1',keyFile:path.join(home,'key'),codexHome:home}));
+  for(const flags of [{cacheChanged:true,cacheRepaired:true},{configChanged:true}]){
+    const result=await manualSync(home,{run:async()=>({ok:true,catalogChanged:false,notModified:true,restartCodex:true,...flags})});
+    assert.match(result.message,/복구했습니다/);assert.match(result.message,/재시작/);assert.doesNotMatch(result.message,/변경이 없습니다/);
+  }
+});

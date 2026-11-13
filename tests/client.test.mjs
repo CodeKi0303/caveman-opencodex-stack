@@ -210,6 +210,117 @@ test('sync with matching ETag changes no bytes, mtimes, cache timestamp or backu
   assert.deepEqual(f.snapshot(),before);
 });
 
+test('matching catalog repairs missing, empty and malformed cache snapshots even on HTTP 304',async t=>{
+  const invalid=[null,'','{broken','{}','{"models":[]}',encode({models:catalog.models}),encode({models:catalog.models,fetched_at:'invalid',client_version:'0.167.0'})];
+  for(const bytes of invalid){
+    const f=fixture(t);await f.run('configure');
+    const cacheFile=path.join(f.home,'models_cache.json');
+    if(bytes===null)fs.unlinkSync(cacheFile);else fs.writeFileSync(cacheFile,bytes);
+    const before=f.snapshot(),result=await f.run('sync'),after=f.snapshot();
+    assert.equal(result.notModified,true);assert.equal(result.catalogChanged,false);
+    assert.equal(result.cacheChanged,true);assert.equal(result.cacheRepaired,true);assert.equal(result.configChanged,false);
+    assert.equal(result.changed,true);assert.equal(result.restartCodex,true);
+    const cache=JSON.parse(fs.readFileSync(cacheFile));
+    assert.deepEqual(cache.models,f.state.catalog.models);assert.equal(cache.client_version,'0.0.0');assert.equal(cache.fetched_at,'2000-01-01T00:00:00Z');
+    for(const name of ['opencodex-catalog.json','config.toml','caveman-catalog-sync.json'])assert.deepEqual(after[name],before[name]);
+    if(bytes!==null)assert.equal(fs.readFileSync(path.join(result.backup,'models_cache.json'),'utf8'),bytes);
+    const stable=f.snapshot(),again=await f.run('sync');
+    assert.equal(again.changed,false);assert.equal(again.cacheChanged,false);assert.equal(again.restartCodex,false);assert.deepEqual(f.snapshot(),stable);
+  }
+});
+
+test('identical HTTP 200 catalog repairs cache and preserves complete model metadata',async t=>{
+  const f=fixture(t);f.state.catalog.models[0].opaqueMetadata={future:{context_window:872000,values:['unchanged',null]}};
+  await f.run('configure');fs.writeFileSync(path.join(f.home,'models_cache.json'),'{"models":[]}');
+  f.state.etag='"new-etag-same-catalog"';
+  const before=f.snapshot(),result=await f.run('sync');
+  assert.equal(result.notModified,false);assert.equal(result.catalogChanged,false);assert.equal(result.cacheRepaired,true);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.home,'models_cache.json'))).models,f.state.catalog.models);
+  assert.deepEqual(f.snapshot()['opencodex-catalog.json'],before['opencodex-catalog.json']);
+});
+
+test('healthy native cache identity and different model defaults remain byte-exact on 304 and catalog updates',async t=>{
+  const f=fixture(t);await f.run('configure');
+  const cacheFile=path.join(f.home,'models_cache.json');
+  const native={fetched_at:'2026-11-13T02:00:00Z',client_version:'0.167.0',etag:'native-models-etag',
+    identity:{provider_id:'openai',auth_mode:'chatgpt',scope:'private-fixture'},
+    futureField:{keep:true},models:[{...catalog.models[0],context_window:272000}]};
+  fs.writeFileSync(cacheFile,JSON.stringify(native)+'\n');
+  const before=f.snapshot(),unchanged=await f.run('sync');
+  assert.equal(unchanged.changed,false);assert.equal(unchanged.cacheChanged,false);assert.equal(unchanged.restartCodex,false);
+  assert.deepEqual(f.snapshot(),before);
+  f.state.etag='"changed-catalog"';f.state.catalog.models[0].context_window=872000;
+  const changed=await f.run('sync');
+  assert.equal(changed.catalogChanged,true);assert.equal(changed.cacheChanged,false);assert.equal(changed.cacheRepaired,false);assert.equal(changed.restartCodex,true);
+  assert.deepEqual(f.snapshot()['models_cache.json'],before['models_cache.json']);
+  const diagnosed=await f.run('doctor');
+  assert.equal(diagnosed.cache.valid,true);assert.equal(diagnosed.cache.modelsMatch,false);assert.equal(diagnosed.cache.repairNeeded,false);
+  assert(!diagnosed.warnings.some(w=>w.startsWith('models_cache_')));
+  assert.equal(diagnosed.catalog.serverMatches,true);
+});
+
+test('outdated compatibility snapshot is updated while a matching native cache keeps its timestamp',async t=>{
+  const f=fixture(t);await f.run('configure');const cacheFile=path.join(f.home,'models_cache.json');
+  const snapshot=JSON.parse(fs.readFileSync(cacheFile));snapshot.models[0].context_window=272000;
+  fs.writeFileSync(cacheFile,encode(snapshot));
+  let result=await f.run('sync');assert.equal(result.catalogChanged,false);assert.equal(result.cacheChanged,true);
+  const native={fetched_at:'2026-11-13T02:00:00Z',client_version:'0.167.0',etag:'native-etag',models:f.state.catalog.models};
+  fs.writeFileSync(cacheFile,encode(native));const before=f.snapshot();
+  result=await f.run('sync');assert.equal(result.cacheChanged,false);assert.deepEqual(f.snapshot(),before);
+});
+
+test('sync repairs the active catalog reference without changing provider, MCP, comments or login',async t=>{
+  const f=fixture(t,'# preserve comments\nprofile = "work"\n[profiles.work]\nmodel_reasoning_effort = "high"\nmodel_catalog_json = "/old/models.json"\n');
+  await f.run('configure');const file=path.join(f.home,'config.toml');
+  fs.writeFileSync(file,patchConfig(fs.readFileSync(file,'utf8'),[{path:['profiles','work','model_catalog_json'],value:'/missing/catalog.json'}]));
+  fs.writeFileSync(path.join(f.home,'auth.json'),'keep-private-login');
+  const before=f.configValue(),oldFiles=f.snapshot(),result=await f.run('sync'),after=f.configValue();
+  assert.equal(result.notModified,true);assert.equal(result.catalogChanged,false);assert.equal(result.cacheChanged,false);assert.equal(result.configChanged,true);assert.equal(result.restartCodex,true);
+  assert.equal(after.profiles.work.model_catalog_json,path.join(f.home,'opencodex-catalog.json').replaceAll('\\','/'));
+  before.profiles.work.model_catalog_json=after.profiles.work.model_catalog_json;assert.deepEqual(after,before);
+  for(const name of ['models_cache.json','opencodex-catalog.json','auth.json'])assert.deepEqual(f.snapshot()[name],oldFiles[name]);
+  assert(fs.readFileSync(file,'utf8').includes('# preserve comments'));
+});
+
+test('doctor reports missing cache and a valid but outdated local catalog without writing files',async t=>{
+  const f=fixture(t);await f.run('configure');fs.unlinkSync(path.join(f.home,'models_cache.json'));
+  let before=f.snapshot(),result=await f.run('doctor');
+  assert.equal(result.cache.exists,false);assert.equal(result.cache.valid,false);assert.equal(result.cache.repairNeeded,true);
+  assert(result.warnings.includes('models_cache_invalid_or_missing'));assert.equal(result.catalog.serverMatches,true);assert.deepEqual(f.snapshot(),before);
+  await f.run('sync');f.state.etag='"updated"';f.state.catalog.models[0].context_window=872000;
+  before=f.snapshot();result=await f.run('doctor');
+  assert.equal(result.catalog.serverMatches,false);assert.equal(result.catalog.ok,false);assert(result.warnings.includes('catalog_server_mismatch'));
+  assert.equal(result.cache.compatibilitySnapshot,true);assert.equal(result.cache.repairNeeded,true);assert.deepEqual(f.snapshot(),before);
+});
+
+test('failed catalog fetch does not repair cache or config from unverified local data',async t=>{
+  const f=fixture(t);await f.run('configure');fs.writeFileSync(path.join(f.home,'models_cache.json'),'');
+  const file=path.join(f.home,'config.toml');fs.writeFileSync(file,patchConfig(fs.readFileSync(file,'utf8'),[{path:['model_catalog_json'],value:'/old/catalog.json'}]));
+  f.state.networkError=true;const before=f.snapshot();
+  await assert.rejects(f.run('sync'),{code:'CATALOG_UNREACHABLE'});assert.deepEqual(f.snapshot(),before);
+});
+
+test('concurrent native cache replacement is detected before sync publishes any repairs',async t=>{
+  const f=fixture(t);await f.run('configure');const file=path.join(f.home,'models_cache.json');fs.writeFileSync(file,'');
+  const native=encode({fetched_at:'2026-11-13T02:00:00Z',client_version:'0.167.0',models:catalog.models});
+  const before=f.snapshot();
+  await assert.rejects(runClient(['sync','--url','http://127.0.0.1:18787/v1','--key-file',path.join(f.home,'key'),'--codex-home',f.home],{
+    fetchFn:async()=>{fs.writeFileSync(file,native);return new Response(null,{status:304,headers:{etag:f.state.etag}});}
+  }),{code:'CONCURRENT_EDIT'});
+  assert.equal(fs.readFileSync(file,'utf8'),native);
+  for(const name of ['config.toml','opencodex-catalog.json','caveman-catalog-sync.json'])assert.deepEqual(f.snapshot()[name],before[name]);
+  assert.equal(Object.keys(f.snapshot()).length,Object.keys(before).length);
+});
+
+test('cache replacement failure restores the previous catalog and metadata',async t=>{
+  const f=fixture(t);await f.run('configure');const file=path.join(f.home,'models_cache.json');fs.writeFileSync(file,'');
+  const before=f.snapshot();f.state.etag='"updated"';f.state.catalog.models[0].context_window=872000;
+  const rename=fs.renameSync;let refused=false;
+  t.mock.method(fs,'renameSync',(source,target)=>{if(target===file&&!refused){refused=true;throw Object.assign(Error('fixture write refused'),{code:'EPERM'});}return rename(source,target);});
+  await assert.rejects(f.run('sync'),{code:'WRITE_FAILED'});
+  for(const name of ['config.toml','opencodex-catalog.json','models_cache.json','caveman-catalog-sync.json'])assert.equal(f.snapshot()[name].contents,before[name].contents);
+});
+
 test('existing catalog acquires ETag metadata once without rewriting config, catalog or cache',async t=>{
   const f=fixture(t);await f.run('configure');fs.unlinkSync(path.join(f.home,'caveman-catalog-sync.json'));
   const before=f.snapshot();const migration=await f.run('sync'),after=f.snapshot();
@@ -227,6 +338,15 @@ test('corrupt local catalog with unsolicited 304 is refetched unconditionally',a
   assert.equal(result.catalogChanged,true);assert.equal(f.state.requests.length-start,2);
   assert(f.state.requests.slice(start).every(r=>r.headers['if-none-match']===undefined));
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.home,'opencodex-catalog.json'))),catalog);
+});
+
+test('unsolicited 304 cannot authorize cache repair from an unverified local catalog',async t=>{
+  const f=fixture(t);await f.run('configure');fs.unlinkSync(path.join(f.home,'caveman-catalog-sync.json'));
+  fs.writeFileSync(path.join(f.home,'models_cache.json'),'');const before=f.snapshot();
+  f.state.force304=2;await assert.rejects(f.run('sync'),{code:'INVALID_CATALOG_304'});assert.deepEqual(f.snapshot(),before);
+  f.state.force304=1;f.state.catalog.models[0].context_window=872000;const result=await f.run('sync');
+  assert.equal(result.notModified,false);assert.equal(result.catalogChanged,true);assert.equal(result.cacheChanged,true);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.home,'models_cache.json'))).models[0].context_window,872000);
 });
 
 test('validation, HTTP, and network failures retain all last-good client files',async t=>{

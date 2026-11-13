@@ -40,6 +40,13 @@ export async function refreshCatalog({url, output, fetchImpl = fetch, signal}) {
   return {changed: true, models: catalog.models.length};
 }
 
+// Refresh on an authenticated catalog read, without a background timer. Requests
+// arriving together share one fetch and one atomic replacement, including failure.
+export function createCatalogRefresher(options) {
+  let pending;
+  return () => pending ??= refreshCatalog(options).finally(() => {pending=undefined;});
+}
+
 export async function refreshCatalogAtStartup(options, {attempts = 3, retryMs = 2000, wait = delay} = {}) {
   if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > 5) throw Error('Invalid startup attempts');
   for (let attempt = 1; attempt <= attempts; attempt++) {

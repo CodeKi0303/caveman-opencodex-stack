@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import {refreshCatalog,refreshCatalogAtStartup} from '../src/catalog-refresh.mjs';
+import {refreshCatalog,refreshCatalogAtStartup,createCatalogRefresher} from '../src/catalog-refresh.mjs';
 
 test('catalog refresh retains full metadata and leaves unchanged files untouched', async t => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'catalog-refresh-'));
@@ -21,6 +21,19 @@ test('catalog refresh retains full metadata and leaves unchanged files untouched
   assert.equal((await fs.stat(output)).mtimeMs, modified);
   assert.deepEqual(JSON.parse(await fs.readFile(output, 'utf8')), catalog);
   assert.deepEqual(await fs.readdir(dir), ['models.json']);
+});
+
+test('on-demand refresh coalesces concurrent clients and releases a failed request for retry',async t=>{
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'catalog-requests-'));
+  t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+  let calls=0,finish,fail=false;
+  const refresh=createCatalogRefresher({url:'http://localhost/models',output:path.join(dir,'models.json'),fetchImpl:async()=>{
+    calls++;await new Promise(resolve=>finish=resolve);if(fail)throw Error('offline');
+    return Response.json({models:[{slug:'test',display_name:'Test'}]});
+  }});
+  const first=refresh(),same=refresh();assert.equal(first,same);assert.equal(calls,1);finish();await first;
+  fail=true;const bad=refresh(),sameBad=refresh();assert.equal(bad,sameBad);finish();await assert.rejects(bad,/offline/);
+  fail=false;const retried=refresh();finish();assert.equal((await retried).changed,false);assert.equal(calls,3);
 });
 
 test('startup refresh retries only until success and finishes after bounded failures', async t => {

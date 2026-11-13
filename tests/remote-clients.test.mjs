@@ -77,11 +77,11 @@ test('batch operations continue after an offline PC and preserve selection and r
   await assert.rejects(runRemoteClients(targets,[],'status'),/INVALID_REMOTE_SELECTION/);
 });
 
-async function controlFixture(t,{capability=true}={}) {
+async function controlFixture(t,{capability=true,repairCapability=true}={}) {
   const home=directory(t),configPath=path.join(home,'native-bridge.json'),authPath=path.join(home,'auth.json');
   fs.writeFileSync(authPath,'UNCHANGED_LOCAL_AUTH');
   const token='a'.repeat(64),state={bodies:[],job:null,busy:false,management:{host:'different-management-host'},bridgePort:18788};
-  const status=()=>({ok:true,capabilities:capability?{remoteClientManagement:1}:{},settings:{upstreamUrl:state.upstreamUrl??'http://old.test/v1',compression:state.compression??true,clientAuthMode:state.clientAuthMode??'forward',bridgeUrl:`http://127.0.0.1:${state.bridgePort}/v1`,management:state.management,key:secret},
+  const status=()=>({ok:true,controlInstance:state.controlInstance,capabilities:{...(capability?{remoteClientManagement:1}:{}),...(repairCapability?{catalogSyncRepair:1}:{})},settings:{upstreamUrl:state.upstreamUrl??'http://old.test/v1',compression:state.compression??true,clientAuthMode:state.clientAuthMode??'forward',bridgeUrl:`http://127.0.0.1:${state.bridgePort}/v1`,management:state.management,key:secret},
     bridge:{ok:true,hotReload:true},gateway:{ok:true},catalog:{count:3,totalCount:9,hiddenCount:6},job:state.job,busy:state.busy});
   const server=http.createServer(async(req,res)=>{
     if(req.url==='/'){res.end(`<meta name="control-token" content="${token}">`);return;}
@@ -89,7 +89,7 @@ async function controlFixture(t,{capability=true}={}) {
     if(req.url==='/api/status'){res.setHeader('content-type','application/json');res.end(JSON.stringify(status()));return;}
     const chunks=[];for await(const chunk of req)chunks.push(chunk);const body=JSON.parse(Buffer.concat(chunks));state.bodies.push({route:req.url,body});
     if(req.url==='/api/settings'){state.upstreamUrl=body.upstreamUrl;state.compression=body.compression;state.clientAuthMode=body.clientAuthMode;res.end(JSON.stringify({ok:true}));return;}
-    state.job={id:'job-one',status:state.failDoctor?'failed':'succeeded',...(state.failDoctor?{error:'DOCTOR_FAILED'}:{}),result:{ok:!state.failDoctor,changed:false,restartCodex:false,warnings:state.failDoctor?['openai_bridge_url_mismatch']:[],mcp:{ok:true,recoveryAvailable:true},bridge:{ok:true},catalog:{ok:true,referenceMatches:true},auth:{token:secret}}};
+    state.job={id:'job-one',status:state.failDoctor?'failed':'succeeded',...(state.failDoctor?{error:'DOCTOR_FAILED'}:{}),result:state.syncResult??{ok:!state.failDoctor,changed:false,restartCodex:false,warnings:state.failDoctor?['openai_bridge_url_mismatch']:[],mcp:{ok:true,recoveryAvailable:true},bridge:{ok:true},catalog:{ok:true,referenceMatches:true},auth:{token:secret}}};
     res.statusCode=202;res.end(JSON.stringify({ok:true,job:state.job}));
   });
   server.listen(0,'127.0.0.1');await once(server,'listening');
@@ -144,4 +144,28 @@ test('Linux SSH bootstrap discovers Node and pipes the worker without command-li
     return spawn('python3',['-c',Buffer.from(encoded,'base64').toString('utf8')],options);
   }});
   assert.equal(result.ok,true);assert.equal(result.applied,true);assert.equal(f.state.bodies[0].body.key,secret);
+});
+
+test('linked sync sends only an expected Pod and skips mismatched Pods or the initiating PC without writes',async t=>{
+ const options={expectedUpstreamUrl:'http://old.test/v1/',sourceControlInstance:'source-instance',requireCacheRepair:true};
+ const plan=buildRemoteClientRequest(target,'sync',options),request=JSON.parse(plan.stdin).request;
+ assert.equal(request.expectedUpstreamUrl,'http://old.test/v1');assert.equal(request.requireCacheRepair,true);assert(!('settings' in request));
+ assert.throws(()=>buildRemoteClientRequest(target,'sync',{...options,key:secret}),/INVALID_REMOTE_SETTINGS/);
+ const f=await controlFixture(t);f.state.busy=true;f.state.controlInstance='source-instance';
+ assert.deepEqual(await runRemoteClientWorker({action:'sync',configPath:f.configPath,...options}),{ok:true,skipped:true,reason:'SOURCE_CLIENT_ALREADY_SYNCED'});
+ f.state.controlInstance='remote-instance';
+ assert.deepEqual(await runRemoteClientWorker({action:'sync',configPath:f.configPath,...options,expectedUpstreamUrl:'http://other.test/v1'}),{ok:true,skipped:true,reason:'REMOTE_POD_MISMATCH'});
+ assert.deepEqual(f.state.bodies,[]);
+});
+
+test('linked sync refuses an old non-repairing panel and preserves cache-only repair fields from a new panel',async t=>{
+ const old=await controlFixture(t,{repairCapability:false});
+ await assert.rejects(runRemoteClientWorker({action:'sync',configPath:old.configPath,requireCacheRepair:true}),/REMOTE_CONTROL_UPGRADE_REQUIRED/);
+ assert.deepEqual(old.state.bodies,[]);
+ const legacy=await runRemoteClientWorker({action:'sync',configPath:old.configPath});assert.equal(legacy.cacheRepairSupported,false);
+ const f=await controlFixture(t);f.state.syncResult={ok:true,catalogChanged:false,cacheChanged:true,cacheRepaired:true,configChanged:true,restartCodex:true,warnings:[],secret};
+ const result=await runRemoteClientWorker({action:'sync',configPath:f.configPath,expectedUpstreamUrl:'http://old.test/v1',requireCacheRepair:true});
+ assert.equal(result.changed,true);assert.equal(result.cacheRepairSupported,true);assert.equal(result.cacheRepaired,true);assert.equal(result.configChanged,true);assert.equal(result.restartCodex,true);
+ assert.deepEqual(f.state.bodies,[{route:'/api/sync',body:{expectedUpstreamUrl:'http://old.test/v1'}}]);
+ assert(!JSON.stringify(result).includes(secret));assert.deepEqual(sanitizeRemoteResult('sync',result),result);
 });

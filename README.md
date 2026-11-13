@@ -27,7 +27,7 @@ Windows / WSL / Linux Codex (본인의 로그인 유지)
     ├─ POST /v1/responses → Caveman :8787 [입력 압축] → OpenCodex :10101
     ├─ 이미지·검색·compact → OpenCodex :10101
     ├─ GET /v1/models → OpenCodex :10101
-    ├─ GET /v1/catalog → 공통 카탈로그 파일 (ETag)
+    ├─ GET /v1/catalog → OpenCodex 목록 갱신 → 공통 카탈로그 (ETag)
     └─ /mcp → Caveman 원문 복구 도구 → 공유 CCR DB
 
 OpenCodex → 본인의 계정 풀에서 사용 가능한 계정 선택 → 제공자의 모델 API
@@ -42,7 +42,7 @@ OpenCodex → 본인의 계정 풀에서 사용 가능한 계정 선택 → 제�
 설치 시 정확한 버전과 `package-lock.json`을 생성한 뒤 빌드하며, 결과를 `data/releases/`에 보관합니다.
 재시작은 설치된 이미지를 그대로 사용합니다. 최신 조회 실패 시 예전 버전으로 대신 설치하지 않습니다.
 
-재현용 Git 고정 버전은 Node.js **24.21.0**, Bun **1.4.3**, OpenCodex **2.84.0**,
+재현용 Git 고정 버전은 Node.js **24.21.0**, Bun **1.4.4**, OpenCodex **2.100.2**,
 Caveman CLI **4.0.1**, Codex CLI **0.162.1**, MCP SDK **1.32.1**입니다.
 `./stack build`는 이 고정 manifest로 명시적으로 빌드할 때 사용합니다.
 Caveman companion 바이너리는 선택된 CLI의 서명 검증 설치기가 결정합니다(고정 버전: `bin-v4.0.1`).
@@ -107,7 +107,8 @@ cd caveman-podman
 설치 이미지와 활성 이미지 기록이 없는 첫 `up`은 세 패키지의 최신 안정 버전을 설치합니다.
 기존 이미지가 있으면 그대로 사용하고 프록시의 준비 상태를 확인한 뒤 공통 카탈로그를 생성합니다.
 고정 버전으로 설치하려면 첫 `up` 전에 `./stack build`를 명시적으로 실행합니다.
-카탈로그는 기동·업데이트 시 한 번 갱신합니다. 컨테이너의 초기 시도는 최대 3회 후 종료하며, 주기적인 갱신 작업은 없습니다.
+카탈로그는 기동·업데이트 시 갱신하며, 인증된 `/v1/catalog` 조회에서도 현재 OpenCodex 목록을 먼저 확인합니다.
+컨테이너의 초기 시도는 최대 3회 후 종료합니다. 주기적인 갱신 작업은 없습니다.
 기본 `CLIENT_AUTH_MODE=forward`는 클라이언트의 기존 모델 인증을 전달합니다.
 서버에 로그인한 메인 계정 또는 풀 계정을 사용하려면 `CLIENT_AUTH_MODE=server`로 설정할 수 있습니다.
 이 모드는 클라이언트 OpenAI 인증을 Caveman 앞에서 제거하며, 게이트웨이 키는 계속 필요합니다.
@@ -233,8 +234,8 @@ node .\scripts\client.mjs configure --url https://codex-proxy.example.com:18787/
 |---|---|
 | `configure` | 기본 `caveman_stack` provider를 만들거나 갱신하고 선택합니다. 카탈로그와 `/mcp`도 연결합니다. |
 | `reconfigure` | 현재 선택된 기존 provider의 주소·게이트웨이 키와 `/mcp`를 갱신합니다. 다른 provider로 선택을 바꾸지 않습니다. `--provider ID`로 수정 대상을 명시할 수 있습니다. |
-| `sync` | 카탈로그만 동기화합니다. provider 주소·인증·MCP 설정은 수정하지 않습니다. |
-| `doctor` | 설정 불일치, 로컬 로그인 메타데이터, 카탈로그 접근과 MCP 도구 목록을 읽기 전용으로 확인합니다. 모델 추론이나 자동 로그인은 수행하지 않습니다. |
+| `sync` | 카탈로그와 설정의 카탈로그 경로를 확인하고, 비었거나 손상된 Codex 캐시를 복구합니다. provider 주소·인증·MCP 설정은 수정하지 않습니다. |
+| `doctor` | 설정 불일치, 캐시 상태, 로컬 로그인 메타데이터, 카탈로그 접근과 MCP 도구 목록을 확인합니다. 클라이언트 파일 변경·모델 추론·자동 로그인은 수행하지 않습니다. |
 
 이전에 `8787`로 연결했거나 게이트웨이 키를 교체했다면 `sync` 대신 연결 설정부터 갱신합니다:
 
@@ -243,13 +244,15 @@ node scripts/client.mjs reconfigure --url http://192.0.2.10:18787/v1 --key-file 
 node scripts/client.mjs doctor --url http://192.0.2.10:18787/v1 --key-file /path/to/gateway-key --codex-home /path/to/.codex
 ```
 
-서버 카탈로그는 기동·업데이트 시 갱신됩니다. 서버 모델 설정을 바꿨거나 즉시 갱신하려면:
+서버 모델 설정을 바꾼 뒤 클라이언트에서 동기화하면 서버의 현재 목록부터 확인합니다.
+웹의 **서버 갱신 + PC 동기화**와 서버 소프트웨어 업데이트는 이 PC와 같은 Pod에 연결된 등록 SSH PC까지 이어서 동기화합니다.
+터미널에서는 다음 명령을 사용할 수 있습니다:
 
 ```bash
-# 서버: 현재 OpenCodex가 제공하는 목록을 공통 카탈로그로 갱신
+# 서버 스냅샷만 명시적으로 갱신 (클라이언트 동기화는 포함하지 않음)
 ./stack catalog
 
-# 각 클라이언트: 동일 목록을 다운로드하고 캐시 갱신
+# 현재 클라이언트: 서버 목록 확인 → 다운로드·캐시·설정 경로 점검
 node scripts/client.mjs sync --url https://codex-proxy.example.com:18787/v1 --key-file /path/to/gateway-key
 ```
 
@@ -257,8 +260,11 @@ node scripts/client.mjs sync --url https://codex-proxy.example.com:18787/v1 --ke
 Desktop도 업데이트해야 할 수 있습니다. `catalog`는 **설치된 OpenCodex가 제공하는 목록**을 내보내며,
 계정별 실제 사용 권한을 보장하지 않습니다. 새 모델을 모르는 버전이라면 다음 업데이트 절차를 먼저 실행하세요.
 카탈로그의 시스템 지침을 직접 생성하거나 다른 모델 행을 복제하지 않습니다.
-카탈로그 API는 `ETag`를 반환하고, 같은 버전의 `If-None-Match` 요청에는 본문 없이 `304`를 반환합니다.
-클라이언트 `sync`도 변경이 없으면 설정·캐시·백업을 다시 쓰지 않습니다. 통신이나 카탈로그 검증이 실패하면 기존 파일을 유지합니다.
+카탈로그 API는 OpenCodex 목록 갱신에 성공한 뒤 `ETag`를 비교하고, 같은 내용이면 `304`를 반환합니다.
+서버 갱신 실패는 `503`으로 알리고 마지막 정상 스냅샷을 보존합니다.
+클라이언트는 `304`여도 `models_cache.json`과 카탈로그 설정 경로를 검사해 필요한 항목만 복구합니다.
+정상인 네이티브 캐시는 카탈로그와 내용이 달라도 보존하며, 모든 항목이 정상일 때 파일·백업을 다시 쓰지 않습니다.
+[동기화 범위와 캐시 복구 기준](docs/CATALOG-SYNC.md)을 참고하세요.
 
 기본 사용 방식은 **수동 동기화**입니다. `configure` 또는 `reconfigure`가
 `<CODEX_HOME>/caveman-client.json`에 서버 주소·키 파일 경로·Node 경로를 저장합니다.
@@ -366,7 +372,7 @@ Codex를 재시작해야 새 provider 설정이 적용됩니다.
 Windows는 `scripts/install-control-panel.ps1`, Linux/WSL은 `node scripts/install-control-panel-linux.mjs`로
 설치합니다. 기본 주소는 `http://127.0.0.1:18786/`이며 Linux 서버에는 GUI가 필요하지 않습니다.
 Windows에서는 바탕화면 `Caveman Control` 바로가기도 만듭니다. Pod 주소·키, 이 PC의 압축 ON/OFF,
-카탈로그 수동 동기화와 서버의 **Caveman CLI·OpenCodex·Codex CLI** 버전 확인·개별 업데이트를 제공합니다.
+카탈로그 동기화와 서버의 **Caveman CLI·OpenCodex·Codex CLI** 버전 확인·선택 일괄 업데이트를 제공합니다.
 Codex CLI는 Pod의 메인 계정 로그인용이며 Windows Codex 데스크톱 앱 업데이트와는 별개입니다.
 같은 Linux 저장소의 Podman은 설치 시 직접 관리 모드를 지정해 SSH 개인키 없이 관리할 수 있습니다.
 페이지가 보이는 동안 상태·경고를 평상시 10초, 작업 중 2.5초 간격으로 갱신하며, 연결 복구 시
@@ -384,8 +390,8 @@ Codex CLI는 Pod의 메인 계정 로그인용이며 Windows Codex 데스크톱 
 | OpenCodex 관리 UI | `http://<서버 LAN IP>:20100/`, `.env`의 `ADMIN_PORT`로 변경 |
 | 관리 UI 공개 인터페이스 | `ADMIN_BIND_ADDRESS` (빈 값이면 `BIND_ADDRESS`와 동일) |
 | 관리자 UI 토큰 | `secrets/admin-key` (필요할 때 로컬에서 확인) |
-| 공통 카탈로그 | `data/state/catalog/models.json`, `./stack catalog`로 생성 |
-| 서버 카탈로그 갱신 | 기동·업데이트 시 1회, 이후 `./stack catalog` |
+| 공통 카탈로그 | `data/state/catalog/models.json`, 현재 OpenCodex 목록의 검증된 스냅샷 |
+| 서버 카탈로그 갱신 | 기동·업데이트·인증된 `/v1/catalog` 조회 시. `./stack catalog`로 직접 실행 가능 |
 | 클라이언트 수동 동기화 | `npm run sync`, Windows `Sync-Catalog.vbs` 더블클릭 |
 | 압축 원문 DB | `data/state/caveman/ccr.db` |
 | 로그 | `./stack logs` |

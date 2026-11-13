@@ -27,33 +27,50 @@ async function api(route,body){
  const data=await r.json();if(!r.ok)throw Error(data.error||'OPERATION_FAILED');return data;
 }
 function showRoute(){const on=$('compression').checked;$('route-compression').textContent=on?'Caveman':'압축 건너뛰기';$('compression-text').textContent=on?'새 모델 요청에 압축을 적용합니다.':'OpenCodex로 직접 전달합니다.';}
+function syncResultText(result){
+ const parts=[];
+ if(result.catalogChanged)parts.push('모델 목록 갱신');
+ if(result.cacheRepaired||result.cacheChanged)parts.push('Codex 캐시 복구');
+ if(result.configChanged)parts.push('카탈로그 연결 설정 복구');
+ if(parts.length)return parts.join(' · ')+' 완료.';
+ return result.changed?'동기화 정보를 갱신했습니다.':'모델 목록·캐시에 변경이 없습니다.';
+}
 function renderResult(job){
- const labels={sync:'모델 카탈로그 동기화',doctor:'연결 진단','check-update':'서버 버전 확인',update:'서버 업데이트','refresh-server-catalog':'서버 카탈로그 갱신','remote-client-action':'등록된 PC 관리'};
- $('job-badge').textContent=job.status==='running'?'실행 중':job.status==='succeeded'?'완료':'실패';$('job-title').textContent=labels[job.action]??job.action;
- if(job.status==='running'){setText($('job-result'),job.action==='update'?'버전 준비 → 이미지 빌드 → 후보 검사 → 백업 및 적용\n몇 분이 걸릴 수 있습니다.':'연결을 확인하고 있습니다…');return;}
+ const labels={sync:'모델 카탈로그 동기화',doctor:'연결 진단','check-update':'서버 버전 확인',update:'서버 업데이트','refresh-server-catalog':'서버 갱신 및 PC 동기화','remote-client-action':'등록된 PC 관리'};
+ $('job-badge').textContent=job.status==='running'?'실행 중':job.status==='succeeded'?'완료':job.status==='partial'?'부분 완료':'실패';$('job-title').textContent=labels[job.action]??job.action;
+ if(job.status==='running'){setText($('job-result'),job.phase==='client-sync'?'서버 작업 완료 → 이 PC와 같은 Pod에 연결된 등록 PC 동기화 중…':job.action==='update'?'버전 준비 → 이미지 빌드 → 후보 검사 → 백업 및 적용 → PC 동기화\n몇 분이 걸릴 수 있습니다.':'연결을 확인하고 있습니다…');return;}
  const r=job.result;
  if(r?.components){versions=r.components;for(const c of Object.keys(components)){const v=versions[c];if(!v)continue;$(c+'-current').textContent=v.current??'—';$(c+'-latest').textContent=v.latest??'확인 실패';if(!versionDirty.has(c))$(c+'-version').value=v.latest??v.current??'';}}
- if(job.action==='update'&&job.status==='succeeded'&&Array.isArray(r?.updates)){for(const {component,version} of r.updates){if(!components[component])continue;versions[component]={...versions[component],current:version};setText($(component+'-current'),version);}}
- let text=job.error?message(job.error):r?.message??(job.action==='sync'?(r.changed?'모델 목록을 갱신했습니다.':'모델 목록에 변경이 없습니다.'):(job.action==='doctor'?'연결 진단을 완료했습니다.':'버전을 확인했습니다.'));
+ if(job.action==='update'&&(job.status==='succeeded'||r?.serverApplied===true)&&Array.isArray(r?.updates)){for(const {component,version} of r.updates){if(!components[component])continue;versions[component]={...versions[component],current:version};setText($(component+'-current'),version);}}
+ let text=job.error?message(job.error):r?.message??(job.action==='sync'?syncResultText(r):(job.action==='doctor'?'연결 진단을 완료했습니다.':'버전을 확인했습니다.'));
  if(r?.restartCodex)text+='\n새 목록을 사용하려면 Codex를 재시작하세요.';
  if(r?.warnings?.length)text+='\n설정 경고: '+r.warnings.join(', ');
  if(job.action==='doctor'&&r)text+='\n브리지: '+(r.bridge?.ok?'정상':'확인 필요')+' · 카탈로그: '+(r.catalog?.ok?'정상':'확인 필요')+' · 원문 복구: '+(r.mcp?.ok?'정상':'확인 필요');
+ if(job.action==='doctor'&&r?.cache)text+=' · Codex 캐시: '+(r.cache.repairNeeded?'복구 필요':'정상');
  if(r?.jobId)text+='\n서버 작업 ID: '+r.jobId;
+ if(r?.clientSync){
+  const local=r.clientSync.local;
+  text+='\n\n이 PC: '+(local?.ok?syncResultText(local):message(local?.error));
+  if(local?.warnings?.length)text+='\n설정 경고: '+local.warnings.join(', ');
+  if(r.clientSync.remote?.results?.length)text+='\n\n등록 PC\n'+remoteResultsText(r.clientSync.remote);
+  if(r.clientSync.remote?.error)text+='\n등록 PC: '+message(r.clientSync.remote.error);
+ }
  if(Array.isArray(r?.results))text=remoteResultsText(r);
  setText($('job-result'),text);
  const marker=job.id+':'+job.status;
- if(job.status==='failed'&&lastJob!==marker)notice(text,true,'job');
+ if(['failed','partial'].includes(job.status)&&lastJob!==marker)notice(text,job.status==='failed','job');
  if(job.status==='succeeded'&&noticeSource==='job')hideNotice();lastJob=marker;
 }
 function remoteResultsText(report){
- const results=report.results,failed=results.filter(item=>!item.ok).length;
- const lines=['완료 '+(results.length-failed)+'대 · 실패 '+failed+'대'];
+ const results=report.results,failed=results.filter(item=>!item.ok).length,skipped=results.filter(item=>item.result?.skipped).length;
+ const lines=['완료 '+(results.length-failed-skipped)+'대 · 실패 '+failed+'대'+(skipped?' · 건너뜀 '+skipped+'대':'')];
  for(const item of results){
   const result=item.result??{},name=item.label||item.host||item.id;
   lines.push('\n'+(item.ok?'✓ ':'✗ ')+name+' ('+item.host+')');
+  if(result.skipped){lines.push(result.reason==='SOURCE_CLIENT_ALREADY_SYNCED'?'현재 PC는 로컬 동기화에서 처리했습니다.':'다른 Pod에 연결되어 있어 건너뛰었습니다.');continue;}
   if(!item.ok){lines.push(message(item.error??result.error));if(result.diagnostic?.warnings?.length)lines.push('설정 경고: '+result.diagnostic.warnings.join(', '));continue;}
-  if(report.action==='sync')lines.push(result.changed?'모델 목록을 갱신했습니다.':'모델 목록에 변경이 없습니다.');
-  else if(report.action==='doctor')lines.push('브리지: '+(result.bridge?.ok?'정상':'확인 필요')+' · 카탈로그: '+(result.catalog?.ok?'정상':'확인 필요')+' · 원문 복구: '+(result.mcp?.ok?'정상':'확인 필요'));
+  if(report.action==='sync')lines.push(syncResultText(result));
+  else if(report.action==='doctor')lines.push('브리지: '+(result.bridge?.ok?'정상':'확인 필요')+' · 카탈로그: '+(result.catalog?.ok?'정상':'확인 필요')+' · 원문 복구: '+(result.mcp?.ok?'정상':'확인 필요')+(result.cache?' · Codex 캐시: '+(result.cache.repairNeeded?'복구 필요':'정상'):''));
   else{
    if(report.action==='apply')lines.push('저장된 연결 설정을 적용했습니다.');
    if(result.upstreamUrl)lines.push(result.upstreamUrl);

@@ -40,23 +40,32 @@ export function sanitizeRemoteStatus(result) {
     clientAuthMode:['forward','server'].includes(settings.clientAuthMode)?settings.clientAuthMode:'unknown',
     bridge:{ok:bridge.ok===true,hotReload:bridge.hotReload===true},gateway:{ok:result.gateway?.ok===true},
     catalog:{count:cleanCount(catalog.count),totalCount:cleanCount(catalog.totalCount),hiddenCount:cleanCount(catalog.hiddenCount)},
-    busy:result.busy===true,canApply:result.capabilities?.remoteClientManagement===1};
+    busy:result.busy===true,canApply:result.capabilities?.remoteClientManagement===1,
+    canRepairCache:result.capabilities?.catalogSyncRepair===1};
 }
 
 function sanitizeJob(action, result) {
-  if(action==='sync')return {ok:result?.ok===true,changed:result?.changed===true||result?.catalogChanged===true,restartCodex:result?.restartCodex===true,warnings:cleanWarnings(result?.warnings)};
+  if(action==='sync')return {ok:result?.ok===true,
+    changed:result?.changed===true||result?.catalogChanged===true||result?.cacheChanged===true||result?.configChanged===true,
+    catalogChanged:result?.catalogChanged===true,cacheChanged:result?.cacheChanged===true,cacheRepaired:result?.cacheRepaired===true,
+    configChanged:result?.configChanged===true,cacheRepairSupported:result?.cacheRepairSupported===true,
+    restartCodex:result?.restartCodex===true,warnings:cleanWarnings(result?.warnings)};
   return {ok:result?.ok===true,warnings:cleanWarnings(result?.warnings),
-    catalog:{ok:result?.catalog?.ok===true,referenceMatches:result?.catalog?.referenceMatches===true},
+    catalog:{ok:result?.catalog?.ok===true,referenceMatches:result?.catalog?.referenceMatches===true,serverMatches:result?.catalog?.serverMatches===true},
+    ...(result?.cache?{cache:{exists:result.cache.exists===true,valid:result.cache.valid===true,
+      modelsMatch:result.cache.modelsMatch===true,repairNeeded:result.cache.repairNeeded===true,
+      compatibilitySnapshot:result.cache.compatibilitySnapshot===true}}:{}),
     bridge:{ok:result?.bridge?.ok===true},mcp:{ok:result?.mcp?.ok===true,recoveryAvailable:result?.mcp?.recoveryAvailable===true}};
 }
 
 export function sanitizeRemoteResult(action, result) {
   if(!result||typeof result!=='object'||typeof result.ok!=='boolean')fail('REMOTE_RESPONSE_INVALID');
   if(result.ok===false)return {ok:false,error:safeCode(result.error),...(result.diagnostic?{diagnostic:sanitizeJob(action,result.diagnostic)}:{})};
+  if(action==='sync'&&result.skipped===true&&['REMOTE_POD_MISMATCH','SOURCE_CLIENT_ALREADY_SYNCED'].includes(result.reason))return {ok:true,skipped:true,reason:result.reason};
   if(action==='sync'||action==='doctor')return sanitizeJob(action,result);
   // Filter SSH output through the same strict schema as the control API.
   return {...sanitizeRemoteStatus({settings:result,bridge:result.bridge,gateway:result.gateway,catalog:result.catalog,busy:result.busy,
-    capabilities:{remoteClientManagement:result.canApply?1:0}}),...(action==='apply'?{applied:result.applied===true,restartCodex:result.restartCodex===true}:{})};
+    capabilities:{remoteClientManagement:result.canApply?1:0,catalogSyncRepair:result.canRepairCache?1:0}}),...(action==='apply'?{applied:result.applied===true,restartCodex:result.restartCodex===true}:{})};
 }
 
 export async function runRemoteClientWorker(input, {request=readLocal, sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms)), now=Date.now} = {}) {
@@ -76,6 +85,14 @@ export async function runRemoteClientWorker(input, {request=readLocal, sleep=ms=
   // mistaken for the file supplied by the operator.
   if(status.settings?.bridgeUrl!==`http://127.0.0.1:${config.port}/v1`||status.settings?.upstreamUrl!==config.upstreamUrl)fail('REMOTE_CONTROL_CONFIG_MISMATCH');
   if(input.action==='status')return sanitizeRemoteStatus(status);
+  if(input.action==='sync'){
+    if(input.sourceControlInstance&&input.sourceControlInstance===status.controlInstance)return {ok:true,skipped:true,reason:'SOURCE_CLIENT_ALREADY_SYNCED'};
+    if(input.expectedUpstreamUrl!==undefined){
+      const canonical=value=>{const u=new URL(value);if(!['http:','https:'].includes(u.protocol)||u.username||u.password||u.search||u.hash||!['/v1','/v1/'].includes(u.pathname))fail('INVALID_REMOTE_SETTINGS');u.pathname='/v1';return u.href;};
+      if(canonical(input.expectedUpstreamUrl)!==canonical(status.settings.upstreamUrl))return {ok:true,skipped:true,reason:'REMOTE_POD_MISMATCH'};
+    }
+    if(input.requireCacheRepair===true&&status.capabilities?.catalogSyncRepair!==1)fail('REMOTE_CONTROL_UPGRADE_REQUIRED');
+  }
   if(status.busy)fail('REMOTE_CLIENT_BUSY');
   if(input.action==='apply') {
     if(status.capabilities?.remoteClientManagement!==1)fail('REMOTE_CONTROL_UPGRADE_REQUIRED');
@@ -92,15 +109,16 @@ export async function runRemoteClientWorker(input, {request=readLocal, sleep=ms=
     if(after.settings?.upstreamUrl!==upstream.href||after.settings?.compression!==value.compression||after.settings?.clientAuthMode!==value.clientAuthMode)fail('REMOTE_SETTINGS_NOT_APPLIED');
     return {ok:true,applied:true,restartCodex:true,...sanitizeRemoteStatus(after)};
   }
-  const started=parseResponse(await request(port,'/api/'+input.action,{token,body:{}}));
+  const started=parseResponse(await request(port,'/api/'+input.action,{token,
+    body:input.action==='sync'&&input.expectedUpstreamUrl?{expectedUpstreamUrl:input.expectedUpstreamUrl}:{}}));
   const jobId=started.job?.id;
   if(typeof jobId!=='string'||!jobId)fail('REMOTE_JOB_INVALID');
   const deadline=now()+90000;
   while(now()<deadline) {
     const current=await getStatus(),job=current.job;
     if(job?.id!==jobId)fail('REMOTE_JOB_REPLACED');
-    if(job.status==='succeeded')return sanitizeJob(input.action,job.result);
-    if(job.status==='failed')return {ok:false,error:safeCode(job.error),...(job.result?{diagnostic:sanitizeJob(input.action,job.result)}:{})};
+    if(job.status==='succeeded')return sanitizeJob(input.action,{...job.result,cacheRepairSupported:status.capabilities?.catalogSyncRepair===1});
+    if(job.status==='failed'||job.status==='partial')return {ok:false,error:safeCode(job.error),...(job.result?{diagnostic:sanitizeJob(input.action,job.result)}:{})};
     await sleep(250);
   }
   fail('REMOTE_JOB_TIMEOUT');
