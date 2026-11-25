@@ -5,8 +5,7 @@ import {isAbsolute} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {Transform} from 'node:stream';
 
-const DEFAULT_LIMIT = 268435456;
-const MAX_LIMIT = 536870912;
+const MAX_LIMIT = 512 * 1024 ** 2;
 // Keep this bridge standalone: the installers copy this one module to CODEX_HOME.
 const clientAuthHeaders = ['authorization','chatgpt-account-id','x-api-key','api-key',
   'openai-organization','openai-project','cookie','cookie2',
@@ -75,7 +74,7 @@ function validLocalRequest(req) {
  * Adds the LAN key and optionally removes client model credentials before LAN.
  * The destination is fixed at startup and never derived from incoming headers.
  */
-export function createNativeBridge({upstreamUrl, key, maxRequestBytes = DEFAULT_LIMIT, timeoutMs = 300000,
+export function createNativeBridge({upstreamUrl, key, maxRequestBytes = MAX_LIMIT, timeoutMs = 300000,
   clientAuthMode: initialClientAuthMode = 'forward', getSettings} = {}) {
   canonicalUpstream(upstreamUrl);
   clientAuthMode(initialClientAuthMode);

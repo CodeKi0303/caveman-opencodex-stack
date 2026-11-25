@@ -7,14 +7,8 @@ import {fileURLToPath} from 'node:url';
 import {Transform} from 'node:stream';
 import {clientAuthHeaders} from './client-auth-headers.mjs';
 import {createCatalogRefresher} from './catalog-refresh.mjs';
-
-// Keep OpenCodex's 256 MiB default, with its supported 512 MiB opt-in ceiling.
-// The supervisor also passes MAX_REQUEST_BYTES to Caveman.
-export const MAX_REQUEST_BYTES = Number(process.env.MAX_REQUEST_BYTES || 268435456);
-const MAX_LIMIT = 536870912;
-function validateLimit(value) {
-  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_LIMIT) throw Error('Invalid request limit');
-}
+import {MAX_REQUEST_BYTES,validateRequestLimit} from './request-limits.mjs';
+export {MAX_REQUEST_BYTES};
 const deniedHeaders = new Set(['connection','keep-alive','proxy-authenticate','proxy-authorization',
   'te','trailer','transfer-encoding','upgrade','host','x-caveman-gateway-key','x-caveman-compression',
   'forwarded','x-forwarded-for','x-forwarded-host','x-forwarded-proto']);
@@ -48,7 +42,7 @@ export function requestMetadata(req) {
     gateway_key_present:typeof req.headers['x-caveman-gateway-key'] === 'string'};
 }
 export function createGateway({key, request = http.request, audit = () => {}, maxRequestBytes = MAX_REQUEST_BYTES, allowedAddress = addressPolicy(), tls, catalogPath, refreshCatalog, recoveryMcp, clientAuthMode = 'forward'} = {}) {
-  validateLimit(maxRequestBytes);
+  validateRequestLimit(maxRequestBytes);
   if (typeof key !== 'string' || key.length < 32) throw Error('Gateway key must be at least 32 characters');
   if (!['forward','server'].includes(clientAuthMode)) throw Error('Invalid client authentication mode');
   let recovery = recoveryMcp;

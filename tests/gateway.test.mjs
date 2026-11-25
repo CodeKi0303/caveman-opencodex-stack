@@ -33,14 +33,14 @@ test('invalid client authentication modes fail before creating a gateway',()=>{
     assert.throws(()=>createGateway({key,clientAuthMode}),/Invalid client authentication mode/);
 });
 
-test('gateway retains its default limit and permits an explicit 512 MiB limit',async t=>{
-  for(const maxRequestBytes of [undefined,536870912]){
+test('gateway defaults to 512 MiB and honors a lower limit',async t=>{
+  for(const maxRequestBytes of [undefined,268435456]){
     let forwarded=0;
     const gateway=createGateway({key,maxRequestBytes,request:()=>{forwarded++;throw Error('Unexpected upstream request');}});
     t.after(()=>{gateway.closeAllConnections();gateway.close();});
     gateway.listen(0,'127.0.0.1');await once(gateway,'listening');
     const url=`http://127.0.0.1:${gateway.address().port}`;
-    const limit=maxRequestBytes??Number(process.env.MAX_REQUEST_BYTES||268435456);
+    const limit=maxRequestBytes??Number(process.env.MAX_REQUEST_BYTES||536870912);
     assert.equal((await fetch(url+'/healthz').then(r=>r.json())).max_request_bytes,limit);
     const refusal=await new Promise((resolve,reject)=>{
       const req=http.request(url+'/v1/responses',{method:'POST',headers:{

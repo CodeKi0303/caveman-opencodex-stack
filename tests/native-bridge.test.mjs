@@ -279,13 +279,13 @@ test('declared and streaming request bodies are bounded',async t => {
   assert(f.seen.every(row => Buffer.byteLength(row.body) <= 16));
 });
 
-test('bridge retains its default limit and permits an explicit 512 MiB limit',async t => {
-  for (const maxRequestBytes of [undefined,536870912]) {
+test('bridge defaults to 512 MiB and honors a lower limit',async t => {
+  for (const maxRequestBytes of [undefined,268435456]) {
     const bridge=createNativeBridge({upstreamUrl:'http://127.0.0.1:1/v1',key,maxRequestBytes});
     t.after(()=>{bridge.closeAllConnections();bridge.close();});
     bridge.listen(0,'127.0.0.1');await once(bridge,'listening');
     const url=`http://127.0.0.1:${bridge.address().port}`;
-    const limit=maxRequestBytes??268435456;
+    const limit=maxRequestBytes??536870912;
     assert.equal(JSON.parse((await call(url+'/healthz')).body).max_request_bytes,limit);
     const refused=await call(url+'/v1/responses',{method:'POST',headers:{'content-length':String(limit+1)}});
     assert.equal(refused.status,413);
@@ -293,7 +293,7 @@ test('bridge retains its default limit and permits an explicit 512 MiB limit',as
   }
 });
 
-test('raised bridge and gateway limits stream a body above 256 MiB to a local mock', {timeout:30000}, async t => {
+test('default bridge and gateway stream a body above 256 MiB to a local mock', {timeout:30000}, async t => {
   const size=268435457;
   let received=0;
   const backend=http.createServer((req,res)=>{
@@ -302,11 +302,11 @@ test('raised bridge and gateway limits stream a body above 256 MiB to a local mo
   });
   t.after(()=>{backend.closeAllConnections();backend.close();});
   backend.listen(0,'127.0.0.1');await once(backend,'listening');
-  const gateway=createGateway({key,maxRequestBytes:536870912,request:(options,callback)=>
+  const gateway=createGateway({key,request:(options,callback)=>
     http.request({...options,hostname:'127.0.0.1',port:backend.address().port},callback)});
   t.after(()=>{gateway.closeAllConnections();gateway.close();});
   gateway.listen(0,'127.0.0.1');await once(gateway,'listening');
-  const bridge=createNativeBridge({key,maxRequestBytes:536870912,
+  const bridge=createNativeBridge({key,
     upstreamUrl:`http://127.0.0.1:${gateway.address().port}/v1`});
   t.after(()=>{bridge.closeAllConnections();bridge.close();});
   bridge.listen(0,'127.0.0.1');await once(bridge,'listening');

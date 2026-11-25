@@ -1,8 +1,12 @@
 import {existsSync,readFileSync} from 'node:fs';
 import {getDefaultConfig,saveConfig} from '../node_modules/@bitkyc08/opencodex/src/config';
 import {startServer} from '../node_modules/@bitkyc08/opencodex/src/server';
+import {MAX_REQUEST_BYTES} from './request-limits.mjs';
 if (!existsSync(`${process.env.OPENCODEX_HOME}/config.json`)) {
   const config=getDefaultConfig();
+  config.maxInboundBodyBytes=MAX_REQUEST_BYTES;
+  // An active stream retains part of its reservation until it finishes.
+  config.maxConcurrentInboundBodyBytes=2 * 1024 ** 3;
   config.hostname='0.0.0.0';
   config.unauthenticatedLoopbackListener={enabled:true,port:10101};
   // One deployment belongs to one person; their clients share this account pool.
